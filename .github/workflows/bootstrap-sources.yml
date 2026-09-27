@@ -1,0 +1,42 @@
+name: Publish exact reviewed source inputs
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+  actions: read
+concurrency:
+  group: publish-reviewed-source-inputs
+  cancel-in-progress: false
+jobs:
+  sources:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Verify reconstruction tools
+        run: |
+          python3 scripts/create-source-bootstrap.test.py
+          python3 scripts/assemble_input_asset_test.py
+          python3 scripts/extract-inputs.test.py
+      - name: Acquire original fixed public payloads
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir downloads
+          gh api repos/BtbN/FFmpeg-Builds/actions/artifacts/10931492582/zip > downloads/source-cache.zip
+          printf '%s  %s\n' fa2f9f26e34789bdac3563fc57872e5e2dc88970060364c502199edecf626055 downloads/source-cache.zip | sha256sum --check --strict
+          gh release download sources-9.0.2-duskcut.1 --repo pascalghanimi/duskcut-ffmpeg --pattern source-bootstrap-support.zip --dir downloads
+          printf '%s  %s\n' 21c5457b88a2ed9ff18176d0aa72da076cf3f2a8f28a22163c6992e36e330f5f downloads/source-bootstrap-support.zip | sha256sum --check --strict
+      - name: Reconstruct and independently verify exact source asset
+        run: |
+          python3 build/safe_extract.py downloads/source-bootstrap-support.zip support
+          python3 scripts/assemble-input-asset.py --support support --btbn-zip downloads/source-cache.zip --output published/duskcut-ffmpeg-source-inputs-9.0.2-1-part01.tar
+          python3 scripts/extract-inputs.py release-assets.json published checked-inputs
+      - name: Publish verified source asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload sources-9.0.2-duskcut.1 --repo pascalghanimi/duskcut-ffmpeg --clobber published/duskcut-ffmpeg-source-inputs-9.0.2-1-part01.tar
+          gh release edit sources-9.0.2-duskcut.1 --repo pascalghanimi/duskcut-ffmpeg --draft=false --latest=false
