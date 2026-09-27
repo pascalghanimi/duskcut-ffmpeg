@@ -185,6 +185,37 @@ class ReleaseTests(unittest.TestCase):
             fixture.package()
         self.assertFalse((fixture.root / 'result').exists())
 
+    def test_runtime_instructions_bind_complete_source_without_modifying_original_input_docs(self):
+        fixture = self.fixture
+        fixture.add_supplement()
+        original_part_hashes = {path.name: module.digest_file(path) for path in fixture.inputs.glob('*.tar')}
+        original_docs = {name: (fixture.inputs / 'sources/distribution' / name).read_bytes()
+                         for name in ('README.md', 'SOURCES.md')}
+        candidate = fixture.package()
+        out = fixture.root / 'result'
+        with zipfile.ZipFile(out / 'duskcut-ffmpeg-test.1-win64.zip') as archive:
+            inventory = {row['path']: row for row in candidate['files']}
+            self.assertNotIn('BUILD-RESULT.json', archive.namelist())
+            for name in original_docs:
+                data = archive.read(name)
+                text = data.decode()
+                self.assertIn(candidate['source']['url'], text)
+                self.assertIn(candidate['source']['sha256'], text)
+                self.assertIn(str(candidate['source']['size']), text)
+                self.assertIn('evidence/BUILD-RESULT.json', text)
+                self.assertEqual(inventory[name]['size'], len(data))
+                self.assertEqual(inventory[name]['sha256'], module.digest_bytes(data))
+                self.assertNotEqual(data, original_docs[name])
+            self.assertIn('inputs/release-assets.json', archive.read('SOURCES.md').decode())
+        for name, data in original_docs.items():
+            self.assertEqual((fixture.inputs / 'sources/distribution' / name).read_bytes(), data)
+        self.assertEqual(original_part_hashes,
+                         {path.name: module.digest_file(path) for path in fixture.inputs.glob('*.tar')})
+        with tarfile.open(out / 'duskcut-ffmpeg-test.1-corresponding-source.tar') as archive:
+            for name, digest in original_part_hashes.items():
+                self.assertEqual(module.digest_bytes(archive.extractfile('inputs/' + name).read()), digest)
+        self.assertEqual(len(list(out.iterdir())), 5)
+
     def test_supplement_binds_build_and_replay_and_preserves_runtime_license(self):
         fixture = self.fixture
         fixture.add_supplement()

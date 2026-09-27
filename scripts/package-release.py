@@ -450,9 +450,66 @@ The assembler does not perform legal, runtime-license, GPU or functional approva
             add_tar_bytes(archive, 'recipe/' + name, data)
     if source_path.stat().st_size > MAX_ASSET_BYTES:
         raise ValueError('Corresponding source exceeds 2 GiB; asset must not be uploaded')
+    url = f'{REPOSITORY}/releases/download/{build_id}/'
+    source_identity = identity(source_path)
+    # Release-specific runtime instructions refer to the complete, already assembled
+    # archive. Original input notices and TAR members remain byte-for-byte unchanged.
+    runtime_readme = f'''# DuskCut FFmpeg {build_id}
+
+This Windows runtime contains bin/ffmpeg.exe and bin/ffprobe.exe, plus license
+notices and source inventories. The observed version token supplied during
+assembly is {version}. Assembly alone is not approval for distribution.
+
+The complete corresponding-source package for this build is:
+{url + source_name}
+SHA-256: {source_identity['sha256']}
+Size: {source_identity['size']} bytes
+
+BUILD-RESULT.json is not inside this runtime ZIP. It is at
+evidence/BUILD-RESULT.json inside the corresponding-source archive above,
+alongside evidence/ffmpeg-build-evidence.tar.xz and SOURCE-BINDING.json.
+These records bind the original executable hashes to the executed build recipe
+and its source inputs. See SOURCES.md for verification and rebuild locations.
+
+Read LICENSE, THIRD-PARTY-NOTICES.txt and any additional notices under sources/.
+The source URL becomes publicly accessible when the reviewed release is published;
+do not distribute this candidate while the corresponding source is unavailable.
+'''.encode()
+    runtime_sources = f'''# Corresponding source for DuskCut FFmpeg {build_id}
+
+Download the complete source archive for this exact runtime:
+{url + source_name}
+
+Expected SHA-256: {source_identity['sha256']}
+Expected size: {source_identity['size']} bytes
+FFmpeg revision: {result['ffmpegRevision']}
+Public build-recipe commit: {revision}
+
+Verify that archive against the SHA-256 and size above, then extract it into
+a new directory. Its README.md explains the offline-input reconstruction steps.
+The archive contains:
+
+- evidence/BUILD-RESULT.json: original executable hashes and build identity.
+- evidence/ffmpeg-build-evidence.tar.xz: executed lock, configuration and logs.
+- SOURCE-BINDING.json: recipe, source inventories and evidence hashes.
+- recipe/: the exact public build scripts recorded for this build.
+- inputs/release-assets.json: hashes and names of every original input part,
+  including supplemental parts when used. Verify input parts against this file,
+  not an older base-only checksum list.
+- inputs/*.tar: the actual original source archives, patches and license notices.
+
+The runtime source inventories under sources/ are summaries, not replacements
+for the complete archive. Supplemental source and license files are separately
+bound by the executed lock and SOURCE-BINDING.json. Original input documents
+are retained unchanged inside their input parts; this file describes this final
+runtime release. The package does not establish source correspondence for older
+Gyan releases or unrelated FFmpeg binaries.
+'''.encode()
     runtime = {**binaries}
     for name in DOCS:
         runtime[name] = regular(inputs, 'sources/distribution/' + name)
+    runtime['README.md'] = runtime_readme
+    runtime['SOURCES.md'] = runtime_sources
     runtime['sources/source-manifest.json'] = manifest_path
     if supplemental_path:
         runtime['sources/supplemental-manifest.json'] = supplemental_path
@@ -462,9 +519,14 @@ The assembler does not perform legal, runtime-license, GPU or functional approva
     runtime_path = output / runtime_name
     inventory = []
     with zipfile.ZipFile(runtime_path, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=6, allowZip64=False) as archive:
-        for name, path in sorted(runtime.items()):
-            archive.write(path, arcname=name)
-            inventory.append({'archivePath': name, 'path': name, **identity(path)})
+        for name, content in sorted(runtime.items()):
+            if isinstance(content, bytes):
+                archive.writestr(name, content)
+                entry_identity = {'size': len(content), 'sha256': digest_bytes(content)}
+            else:
+                archive.write(content, arcname=name)
+                entry_identity = identity(content)
+            inventory.append({'archivePath': name, 'path': name, **entry_identity})
     if runtime_path.stat().st_size > MAX_RUNTIME_BYTES:
         raise ValueError('Runtime ZIP exceeds application limit; asset must not be uploaded')
     with zipfile.ZipFile(runtime_path) as archive:
@@ -477,11 +539,10 @@ The assembler does not perform legal, runtime-license, GPU or functional approva
                     hasher.update(chunk)
             if hasher.hexdigest() != row['sha256']:
                 raise ValueError('Generated ZIP file hash mismatch')
-    url = f'{REPOSITORY}/releases/download/{build_id}/'
     candidate = {'schemaVersion': 1, 'approvalStatus': 'candidate-awaiting-review', 'buildId': build_id,
                  'version': version, 'ffmpegCommit': result['ffmpegRevision'], 'buildRecipeCommit': revision,
                  'archive': {'url': url + runtime_name, **identity(runtime_path)},
-                 'source': {'url': url + source_name, **identity(source_path)}, 'files': inventory}
+                 'source': {'url': url + source_name, **source_identity}, 'files': inventory}
     (output / 'ffmpeg-release.candidate.json').write_bytes(json_bytes(candidate))
     (output / 'SOURCE-BINDING.json').write_bytes(json_bytes(binding))
     (output / 'SHA256SUMS.txt').write_text(''.join(f'{digest_file(output / name)}  {name}\n' for name in
