@@ -1,0 +1,59 @@
+name: Assemble reviewed build for release
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_run:
+        description: Successful controlled-build run ID from this repository
+        required: true
+        type: string
+      version:
+        description: Exact version token measured from BOTH Windows executables
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: assemble-controlled-release
+  cancel-in-progress: false
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+
+      - name: Test release assembly boundaries
+        run: |
+          python3 scripts/package-release.test.py
+          python3 scripts/release-workflow.test.py
+          python3 scripts/extract-inputs.test.py
+          node --test scripts/fetch-inputs.test.mjs
+
+      - name: Fetch completed build and its exact source inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_RUN: ${{ inputs.build_run }}
+        run: python3 scripts/prepare-release-inputs.py
+
+      - name: Assemble source and runtime candidates
+        env:
+          OBSERVED_VERSION: ${{ inputs.version }}
+        run: |
+          python3 scripts/package-release.py --artifact-dir build-artifact --source-staging source-staging --repo-dir . --output packaged-release --version "$OBSERVED_VERSION"
+
+      - name: Upload only to a draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/upload-draft-release.py
