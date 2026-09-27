@@ -1,0 +1,10 @@
+sources/downloads/
+sources/archives/
+sources/build-lock.json
+downloads/
+out/
+node_modules/
+__pycache__/
+*.partial
+.env
+.env.*
