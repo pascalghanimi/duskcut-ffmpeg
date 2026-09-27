@@ -13,6 +13,19 @@ const manifestFile = directoryMode ? resolve(manifestArg, 'source-manifest.json'
 const outputRoot = directoryMode ? resolve(manifestArg) : dirname(manifestFile)
 const sourcePrefix = directoryMode ? 'sources/' : ''
 const manifest = JSON.parse(readFileSync(manifestFile, 'utf8'))
+const supplementFile = resolve(outputRoot, 'sources/supplemental-manifest.json')
+const supplement = JSON.parse(readFileSync(supplementFile, 'utf8'))
+const release = JSON.parse(readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../release-assets.json'), 'utf8'))
+const manifestSha256 = await hashFile(manifestFile)
+const supplementSha256 = await hashFile(supplementFile)
+if (release.releaseTag !== `sources-${buildId}` || manifestSha256 !== release.sourceManifestSha256 ||
+    supplementSha256 !== release.supplementalManifestSha256) throw new Error('released_source_manifest_integrity_mismatch')
+if (supplement.schemaVersion !== 1 || !Array.isArray(supplement.files) ||
+    supplement.freetypeDlg?.id !== 'freetype-dlg' ||
+    supplement.freetypeDlg.revision !== '395ccad2c1e0daae535c4d20bb0a3f2424648e17' ||
+    supplement.freetypeDlg.parentRevision !== 'd333439633039de426f943f28a2926c7f97b5ae5') {
+  throw new Error('missing_or_mismatched_freetype_submodule_manifest')
+}
 const profileFile = resolve(dirname(fileURLToPath(import.meta.url)), 'profile.json')
 const profile = JSON.parse(readFileSync(profileFile, 'utf8'))
 const stageNames = new Set(profile.sourceStages)
@@ -21,6 +34,10 @@ const blobs = manifest.files.map(row => ({
   id: row.id, role: roles[row.role] || row.role,
   file: sourcePrefix + row.file, bytes: row.bytes, sha256: row.sha256, origin: row.origin,
 })).filter(row => !row.file.startsWith(sourcePrefix + 'downloads/') || stageNames.has(row.id))
+for (const row of supplement.files) {
+  if (!row.file?.startsWith('sources/') || !['source', 'license-evidence', 'review-evidence'].includes(row.role)) throw new Error('invalid_supplement_file')
+  blobs.push({ id: row.id, role: row.role, file: row.file, bytes: row.bytes, sha256: row.sha256, origin: row.origin })
+}
 const selected = manifest.files.filter(row => stageNames.has(row.stage))
 if (selected.length !== stageNames.size || [...stageNames].some(stage => !selected.some(row => row.stage === stage))) throw new Error('selected_source_closure_missing_or_duplicate')
 const noticeIds = new Map()
@@ -46,13 +63,16 @@ const lock = {
   ffmpeg: { blobId: requireFile('ffmpeg').id, revision: manifest.ffmpegRevision, sourceDateEpoch: 1790467200 },
   sourceCache: { members: selected.map(row => ({ blobId: row.id, cacheName: basename(row.file) })).sort((a, b) => a.cacheName.localeCompare(b.cacheName)) },
   oneVplPatch: { blobId: requireFile('onevpl-patch').id },
+  freetypeDlg: { blobId: requireFile('freetype-dlg').id, revision: supplement.freetypeDlg.revision,
+    parentRevision: supplement.freetypeDlg.parentRevision, noticeBlobId: requireFile('freetype-dlg-license').id },
   toolchain: { image: manifest.toolchain.image },
   runtimeComponents: [
     { name: 'MinGW-w64 CRT and winpthreads', version: '57b595039040eaa15bece85b7cc71d952281b269', license: 'MinGW-w64 licenses retained in corresponding source', noticeBlobId: noticeIds.get(mingwNotice.file), sourceBlobId: requireFile('10-mingw').id },
     runtime('GCC libgcc', 'gcc-libgcc2-c'), runtime('GCC libgomp', 'gcc-libgomp-h'), runtime('GCC libstdc++', 'gcc-new-op-cc'),
   ],
   blobs,
-  sourceManifest: { file: basename(manifestFile), sha256: await hashFile(manifestFile) },
+  sourceManifest: { file: basename(manifestFile), sha256: manifestSha256 },
+  supplementalSourceManifest: { file: 'sources/supplemental-manifest.json', sha256: supplementSha256 },
   sourceDateEpochNote: 'Fixed release build timestamp, not a claim about the upstream commit author date.',
 }
 const target = resolve(outputRoot, 'build-lock.json')

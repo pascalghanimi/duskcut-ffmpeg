@@ -3,6 +3,7 @@
   "releaseTag": "sources-9.0.2-duskcut.1",
   "extractTo": ".",
   "sourceManifestSha256": "5ec9c1f5993c28156c680b8e5f9e35b33da29a6fb74cde653814cc8416764aec",
+  "supplementalManifestSha256": "d7bc14821d5787afa680d6901751bb6695027600d56c5e73492a4f8ba1fe4e41",
   "assets": [
     {
       "file": "duskcut-ffmpeg-source-inputs-9.0.2-1-part01.tar",
@@ -10,6 +11,12 @@
       "sha256": "e996b20b3583f2b0aef8919641de9be1df7ce13178383865c9573c38a3a58f65",
       "fileCount": 253,
       "url": "https://github.com/pascalghanimi/duskcut-ffmpeg/releases/download/sources-9.0.2-duskcut.1/duskcut-ffmpeg-source-inputs-9.0.2-1-part01.tar"
+    },
+    {
+      "file": "duskcut-ffmpeg-source-supplement-dlg-395ccad2c1e0.tar",
+      "url": "https://github.com/pascalghanimi/duskcut-ffmpeg/releases/download/sources-9.0.2-duskcut.1/duskcut-ffmpeg-source-supplement-dlg-395ccad2c1e0.tar",
+      "bytes": 849920,
+      "sha256": "fabaa25336bfdf71a232060b143f527dde56ee09cef5fc1505fa4bc2af19e3f0"
     }
   ]
 }

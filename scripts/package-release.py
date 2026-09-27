@@ -19,6 +19,25 @@ MAX_TEXT_BYTES = 256 * 1024 ** 2
 DOCS = ('LICENSE', 'README.md', 'SOURCES.md', 'THIRD-PARTY-NOTICES.txt')
 CONTROLS = ('container-generate.sh', 'container-compile.sh', 'safe_extract.py',
             'capture_environment.py', 'prepare_recipe.py', 'profile.json')
+# These are produced unconditionally by the pinned container scripts and orchestrator.
+# A ZIP of executables plus an incomplete hand-selected log must not pass for build evidence.
+CONFIGURATION = (
+    'Dockerfile.duskcut', 'generated-Dockerfile-original', 'duskcut-recipe.patch',
+    'profile.json', 'config.h', 'config_components.h', 'config.asm', 'config.mak',
+    'config.log', 'build-environment.json', 'compiler-version.txt',
+    'compiler-cxx-version.txt', 'linker-version.txt', 'compiler-image-packages.txt',
+    'dependency-prefix-sha256.txt', 'compiler-runtime-archive-sha256.txt',
+    'ffmpeg-pe-imports.txt', 'ffprobe-pe-imports.txt', 'binary-sha256.txt',
+)
+BUILD_RECORDS = (
+    'work/toolchain-build-environment.json', 'work/toolchain-image.json',
+    'work/docker-version.json', 'work/dependency-image.json', 'work/compile-result.json',
+    'work/selected-source-cache-files.txt', 'work/generate.log',
+    'work/dependencies.log', 'work/ffmpeg-build.log',
+)
+# The successful recipe-generation phase may produce no stdout/stderr. Keep its log present,
+# while requiring substantive configuration, compiler output and compile logs to contain data.
+EMPTY_LOGS_ALLOWED = frozenset(('work/generate.log',))
 HASH = re.compile(r'[a-f0-9]{64}')
 COMMIT = re.compile(r'[a-f0-9]{40}')
 TOKEN = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.+-]{0,149}')
@@ -148,6 +167,39 @@ def repository_snapshot(repository, revision):
     return files
 
 
+def source_records(inputs, manifest, supplemental_hash=None):
+    """Normalize both source inventories without allowing a supplement to replace base data."""
+    records = [{**row, 'file': 'sources/' + row['file']} for row in manifest['files'] + manifest['notices']]
+    supplemental_path = pathlib.Path(inputs) / 'sources/supplemental-manifest.json'
+    if supplemental_hash is None:
+        if supplemental_path.exists():
+            raise ValueError('Unbound supplemental source manifest')
+        return records, None, None
+    supplemental_path = regular(inputs, 'sources/supplemental-manifest.json')
+    if not HASH.fullmatch(str(supplemental_hash)) or digest_file(supplemental_path) != supplemental_hash:
+        raise ValueError('Supplemental source manifest hash mismatch')
+    supplement = read_json(supplemental_path)
+    if (supplement.get('schemaVersion') != 1 or not isinstance(supplement.get('files'), list)
+            or not supplement['files'] or not isinstance(supplement.get('notices'), list)):
+        raise ValueError('Invalid supplemental source manifest')
+    names = {row['file'].casefold() for row in records}
+    names.update(('source-manifest.json', 'sources/source-manifest.json', 'sources/readme.md',
+                  'sources/supplemental-manifest.json'))
+    names.update('sources/distribution/' + name.casefold() for name in DOCS)
+    ids = {row['id'] for row in records if 'id' in row}
+    for row in supplement['files'] + supplement['notices']:
+        name = safe_name(row.get('file'))
+        if (not name.startswith('sources/') or name.casefold() in names
+                or not isinstance(row.get('id'), str) or not row['id'] or row['id'] in ids
+                or row.get('role') not in ('source', 'license-evidence', 'review-evidence')):
+            raise ValueError('Duplicate, replacing or invalid supplemental source')
+        names.add(name.casefold())
+        ids.add(row['id'])
+        verify_identity(regular(inputs, name), row.get('bytes'), row.get('sha256'))
+        records.append(row)
+    return records, supplemental_path, supplement
+
+
 def verify_build(artifact, inputs, repository, version):
     if not TOKEN.fullmatch(version):
         raise ValueError('Pass the exact version token observed on Windows')
@@ -186,6 +238,10 @@ def verify_build(artifact, inputs, repository, version):
         raise ValueError('Build evidence archive hash mismatch')
     with tarfile.open(evidence_path, 'r:*') as evidence:
         members = archive_files(evidence)
+        for required in tuple('work/configuration/' + name for name in CONFIGURATION) + BUILD_RECORDS:
+            member = members.get(required)
+            if member is None or (member.size == 0 and required not in EMPTY_LOGS_ALLOWED):
+                raise ValueError('Missing or empty required build evidence: ' + required)
         for name, member in members.items():
             allowed = (name in ('BUILD-RESULT.json', 'inputs/build-lock.json')
                        or name.startswith(('work/control/', 'work/configuration/'))
@@ -209,6 +265,24 @@ def verify_build(artifact, inputs, repository, version):
             raise ValueError('Build lock hash does not match result')
         if lock.get('sourceManifest', {}).get('sha256') != digest_file(manifest_path):
             raise ValueError('Build lock does not bind these source inputs')
+        extra = lock.get('supplementalSourceManifest')
+        if extra is not None and (not isinstance(extra, dict)
+                                  or extra.get('file') != 'sources/supplemental-manifest.json'):
+            raise ValueError('Unexpected supplemental manifest path')
+        records, supplemental_path, supplement = source_records(inputs, manifest, extra.get('sha256') if extra else None)
+        if supplement:
+            dlg, locked_dlg = supplement.get('freetypeDlg', {}), lock.get('freetypeDlg', {})
+            rows_by_id = {row.get('id'): row for row in supplement['files'] + supplement['notices']}
+            if (dlg.get('id') != 'freetype-dlg' or not COMMIT.fullmatch(dlg.get('revision', ''))
+                    or not COMMIT.fullmatch(dlg.get('parentRevision', ''))
+                    or locked_dlg.get('blobId') != dlg['id']
+                    or locked_dlg.get('noticeBlobId') != 'freetype-dlg-license'
+                    or any(locked_dlg.get(key) != dlg[key] for key in ('revision', 'parentRevision'))
+                    or rows_by_id.get('freetype-dlg', {}).get('role') != 'source'
+                    or rows_by_id.get('freetype-dlg-license', {}).get('role') != 'license-evidence'
+                    or any(rows_by_id.get(key, {}).get('revision') != dlg['revision']
+                           for key in ('freetype-dlg', 'freetype-dlg-license'))):
+                raise ValueError('Supplemental source identity differs from executed lock')
         if lock.get('buildId') != result['buildId'] or lock.get('schemaVersion') != 2:
             raise ValueError('Build lock identity mismatch')
         if json.loads(member_bytes(evidence, members, 'work/control/lock.json')) != lock:
@@ -219,17 +293,22 @@ def verify_build(artifact, inputs, repository, version):
         profile = member_bytes(evidence, members, 'work/control/profile.json')
         if digest_bytes(profile) != lock.get('profile', {}).get('sha256'):
             raise ValueError('Executed profile differs from locked profile')
-        pinned = {('sources/' + row['file'], row['bytes'], row['sha256']) for row in manifest['files'] + manifest['notices']}
+        if member_bytes(evidence, members, 'work/configuration/profile.json') != profile:
+            raise ValueError('Generated configuration profile differs from executed profile')
+        compiled = json.loads(member_bytes(evidence, members, 'work/compile-result.json'))
+        if any(compiled.get(key) != result[key] for key in ('buildId', 'ffmpegRevision', 'recipeRevision')):
+            raise ValueError('Compile-stage result differs from final build result')
+        pinned = {(row['file'], row['bytes'], row['sha256']) for row in records}
         for blob in result.get('sourceInputs', []):
             if (blob['file'], blob['bytes'], blob['sha256']) not in pinned:
                 raise ValueError('Build used a source outside the packaged manifest')
         binding = lambda rows: sorted((row['id'], row['file'], row['bytes'], row['sha256']) for row in rows)
         if not result.get('sourceInputs') or binding(result['sourceInputs']) != binding(lock['blobs']):
             raise ValueError('Build result source inputs differ from executed lock')
-    for row in manifest['files'] + manifest['notices']:
-        path = regular(inputs, 'sources/' + row['file'])
+    for row in records:
+        path = regular(inputs, row['file'])
         verify_identity(path, row['bytes'], row['sha256'])
-    return result, revision, snapshot, binaries, evidence_path, manifest_path
+    return result, revision, snapshot, binaries, evidence_path, manifest_path, supplemental_path, supplement
 
 
 def verify_input_parts(inputs, manifest_path):
@@ -237,15 +316,25 @@ def verify_input_parts(inputs, manifest_path):
     release = read_json(release_path)
     if release.get('schemaVersion') != 1 or release.get('sourceManifestSha256') != digest_file(manifest_path):
         raise ValueError('Source release manifest mismatch')
+    if (release.get('extractTo') != '.'
+            or not re.fullmatch(r'sources-[a-z0-9.-]+', release.get('releaseTag', ''))
+            or not isinstance(release.get('assets'), list) or not release['assets']):
+        raise ValueError('Source release metadata cannot be replayed by the extractor')
     parts, names, archived_names = [], set(), set()
     required = {'source-manifest.json', 'sources/source-manifest.json', 'sources/README.md'}
     source_manifest = read_json(manifest_path)
-    required.update('sources/' + row['file'] for row in source_manifest['files'] + source_manifest['notices'])
+    records, supplemental_path, _ = source_records(inputs, source_manifest, release.get('supplementalManifestSha256'))
+    required.update(row['file'] for row in records)
+    if supplemental_path:
+        required.add('sources/supplemental-manifest.json')
     required.update('sources/distribution/' + name for name in DOCS)
     for row in release.get('assets', []):
         name = safe_name(row['file'])
-        if '/' in name or name.casefold() in names:
+        if not re.fullmatch(r'[a-zA-Z0-9_.-]+\.tar(?:\.gz|\.xz)?', name) or name.casefold() in names:
             raise ValueError('Duplicate or unexpected source asset path')
+        expected_url = REPOSITORY + '/releases/download/' + release['releaseTag'] + '/' + name
+        if row.get('url') != expected_url:
+            raise ValueError('Source asset URL is missing or cannot be replayed by the extractor')
         names.add(name.casefold())
         path = regular(inputs, name)
         verify_identity(path, row['bytes'], row['sha256'])
@@ -291,7 +380,7 @@ def package(artifact, inputs, repository, output, version):
     artifact, inputs, repository, output = map(pathlib.Path, (artifact, inputs, repository, output))
     if output.exists():
         raise ValueError('Output directory must be new')
-    result, revision, snapshot, binaries, evidence_path, manifest_path = verify_build(artifact, inputs, repository, version)
+    result, revision, snapshot, binaries, evidence_path, manifest_path, supplemental_path, supplement = verify_build(artifact, inputs, repository, version)
     release_path, parts = verify_input_parts(inputs, manifest_path)
     if json.loads(snapshot.get('release-assets.json', b'null')) != read_json(release_path):
         raise ValueError('Source assets are not those pinned by the actual build commit')
@@ -309,13 +398,18 @@ def package(artifact, inputs, repository, output, version):
                'sourceManifestSha256': digest_file(manifest_path), 'binaryHashes': result['binaryHashes'],
                'buildEvidence': identity(evidence_path), 'sourceInputAssets': read_json(release_path)['assets'],
                'recipeSnapshot': [{'file': name, 'size': len(data), 'sha256': digest_bytes(data)} for name, data in sorted(snapshot.items())]}
+    if supplemental_path:
+        binding['supplementalSourceManifestSha256'] = digest_file(supplemental_path)
     rebuild = f'''# Corresponding source for DuskCut FFmpeg {build_id}
 
 This package binds FFmpeg source inputs, the executed build and the exact public
 build scripts to the executable hashes recorded in evidence/BUILD-RESULT.json.
 SOURCE-BINDING.json provides hashes and recipe commit {revision}.
-The complete original source archives and notices are included in inputs/*.tar;
-they are not external download links. The executed recipe/configuration/patch
+The complete original source archives and notices, including any immutable
+supplemental source parts, are included in inputs/*.tar; they are not external
+download links. A supplemental manifest, when present, is separately hash-bound
+by the executed build lock, input-release manifest and SOURCE-BINDING.json.
+The executed recipe/configuration/patch
 records are included in evidence/ffmpeg-build-evidence.tar.xz.
 
 To inspect and rebuild on a Linux Docker host with Node.js 24 and Python 3.12:
@@ -360,6 +454,11 @@ The assembler does not perform legal, runtime-license, GPU or functional approva
     for name in DOCS:
         runtime[name] = regular(inputs, 'sources/distribution/' + name)
     runtime['sources/source-manifest.json'] = manifest_path
+    if supplemental_path:
+        runtime['sources/supplemental-manifest.json'] = supplemental_path
+        for row in supplement['files'] + supplement['notices']:
+            if row['role'] in ('license-evidence', 'review-evidence'):
+                runtime[row['file']] = regular(inputs, row['file'])
     runtime_path = output / runtime_name
     inventory = []
     with zipfile.ZipFile(runtime_path, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=6, allowZip64=False) as archive:

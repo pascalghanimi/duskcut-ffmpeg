@@ -30,6 +30,24 @@ async function fixture(fn) {
   await save()
   try { await fn({ root, lock, path, save }) } finally { await rm(root, { recursive: true, force: true }) }
 }
+
+async function selectedFixture(fn) {
+  return fixture(async (state) => {
+    const { lock, root, save } = state
+    lock.schemaVersion = 2
+    lock.buildId = '9.0.2-duskcut.1'
+    lock.profile = { id: 'duskcut-win64-gpl-no-dvd-v1', sha256: '1'.repeat(64) }
+    for (const [id, role] of [['onevpl', 'patch'], ['dlg', 'source']]) {
+      await writeFile(resolve(root, id), id)
+      lock.blobs.push({ id, role, file: id, bytes: id.length, sha256: createHash('sha256').update(id).digest('hex'), origin: `https://example.com/${id}` })
+    }
+    lock.oneVplPatch = { blobId: 'onevpl' }
+    lock.freetypeDlg = { blobId: 'dlg', noticeBlobId: 'notice', revision: '395ccad2c1e0daae535c4d20bb0a3f2424648e17', parentRevision: 'd333439633039de426f943f28a2926c7f97b5ae5' }
+    lock.sourceCache = { members: [{ blobId: 'cache', cacheName: `25-freetype_${'a'.repeat(64)}.tar.xz` }] }
+    await save()
+    await fn(state)
+  })
+}
 test('valid input integrity does not imply legal or source approval', () => fixture(async ({ path }) => {
   const result = await validateLock(path)
   assert.equal(result.status, 'inputs-integrity-verified-not-source-or-legal-approval')
@@ -96,19 +114,32 @@ test('authenticated or signed source origins cannot enter public bundle', () => 
   await save()
   await assert.rejects(validateLock(path), /nonpublic_or_credential_origin/)
 }))
-test('selected-source lock rejects DVD/CSS sources before a compiler starts', () => fixture(async ({ lock, path, save }) => {
-  lock.schemaVersion = 2
-  lock.buildId = '9.0.2-duskcut.1'
-  lock.profile = { id: 'duskcut-win64-gpl-no-dvd-v1', sha256: '1'.repeat(64) }
-  lock.oneVplPatch = { blobId: 'recipe' }
-  lock.blobs[0].role = 'patch'
-  lock.recipe.blobId = 'ffmpeg'
-  lock.blobs[2].role = 'recipe'
-  lock.ffmpeg.blobId = 'notice'
-  lock.blobs[3].role = 'ffmpeg-source'
+test('selected-source lock rejects DVD/CSS sources before a compiler starts', () => selectedFixture(async ({ lock, path, save }) => {
   lock.sourceCache = { members: [{ blobId: 'cache', cacheName: `50-libdvdcss_${'a'.repeat(64)}.tar.xz` }] }
   await save()
   await assert.rejects(validateLock(path), /invalid_duplicate_or_forbidden_cache_member/)
+}))
+
+test('selected-source profile includes exact FreeType submodule source and license', () => selectedFixture(async ({ path }) => {
+  const checked = await validateLock(path)
+  assert.equal(checked.blobs.get(checked.lock.freetypeDlg.blobId).role, 'source')
+}))
+
+test('missing FreeType submodule source cannot pass selected-source validation', () => selectedFixture(async ({ lock, path, save }) => {
+  delete lock.freetypeDlg
+  await save()
+  await assert.rejects(validateLock(path), /missing_source_blob/)
+}))
+
+test('a different FreeType submodule commit cannot silently replace the archived gitlink', () => selectedFixture(async ({ lock, path, save }) => {
+  lock.freetypeDlg.revision = 'a'.repeat(40)
+  await save()
+  await assert.rejects(validateLock(path), /unpinned_freetype_submodule/)
+}))
+
+test('FreeType supplementary source corruption stops before compilation', () => selectedFixture(async ({ root, path }) => {
+  await writeFile(resolve(root, 'dlg'), 'bad')
+  await assert.rejects(validateLock(path), /blob_integrity_mismatch:dlg/)
 }))
 test('dependency stages serialize without a circular link to combination/final stages', () => {
   const generated = 'FROM pinned AS base-layer\nFROM base-layer AS mingw\nRUN build-mingw\nFROM base-layer AS x264\nRUN build-x264\nFROM base-layer AS combine-layer\nCOPY --from=x264 /out /out\nFROM base-layer\nCOPY --from=combine-layer /out /out\n'

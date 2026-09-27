@@ -60,6 +60,10 @@ export async function validateLock(lockFile) {
   if (lock.schemaVersion === 1) requiredBlob(blobs, lock.downloadCache.blobId, 'source-cache')
   else {
     requiredBlob(blobs, lock.oneVplPatch?.blobId, 'patch')
+    requiredBlob(blobs, lock.freetypeDlg?.blobId, 'source')
+    requiredBlob(blobs, lock.freetypeDlg?.noticeBlobId, 'license-evidence')
+    if (lock.freetypeDlg.revision !== '395ccad2c1e0daae535c4d20bb0a3f2424648e17' ||
+        lock.freetypeDlg.parentRevision !== 'd333439633039de426f943f28a2926c7f97b5ae5') throw new Error('unpinned_freetype_submodule')
     if (!Array.isArray(lock.sourceCache?.members) || !lock.sourceCache.members.length) throw new Error('missing_selected_sources')
     const caches = new Set()
     for (const member of lock.sourceCache.members) {

@@ -11,6 +11,11 @@ The build uses the BtbN recipe revision and base-win64 compiler image pinned in
 the source manifest. It rebuilds 41 selected source archives, including MinGW CRT
 and winpthreads. All dependency and FFmpeg compilation runs with network access
 disabled. The oneVPL patch is an archived, hash-checked input, applied locally.
+The pinned FreeType snapshots omit their `dlg` git submodule. A separately
+published supplemental source archive supplies the exact gitlink revision
+`395ccad2c1e0daae535c4d20bb0a3f2424648e17` and its Boost license. Both FreeType
+build passes verify the parent gitlink and copy this source before running
+upstream `autogen.sh`; no submodule clone or other network access is allowed.
 
 ## Rebuild
 
@@ -20,7 +25,10 @@ each stage uses the runner's available CPU cores. The CI runner has four cores
 and 16 GB RAM. The compiler image contains Python and build tools.
 
 1. Download and verify the immutable source input release archives using the
-   repository's input-fetching script. Extract them into `input-data/`.
+   repository's input-fetching script. Extract both the original source archive
+   and the supplemental source archive into `input-data/`. The original archive
+   is unchanged; the supplement adds `sources/supplemental-manifest.json` and its
+   content-hashed source/license files without overwriting original inputs.
 2. Create and validate the build lock:
 
    ```sh

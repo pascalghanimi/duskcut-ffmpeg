@@ -3,9 +3,11 @@ import difflib
 import json
 import pathlib
 import re
+import shutil
+import subprocess
 import sys
 
-recipe, profile_file, patch_file, evidence = map(pathlib.Path, sys.argv[1:])
+recipe, profile_file, patch_file, dlg_file, evidence = map(pathlib.Path, sys.argv[1:])
 profile = json.loads(profile_file.read_text())
 evidence.mkdir(parents=True, exist_ok=True)
 changes = []
@@ -44,6 +46,37 @@ contents += '\nffbuild_dockerstage() {\n    to_df "RUN --mount=src=${SELF},dst=/
 replace("scripts.d/50-onevpl.sh", contents)
 (recipe / "patches").mkdir(exist_ok=True)
 (recipe / "patches/onevpl.patch").write_bytes(patch_file.read_bytes())
+
+# The upstream FreeType cache contains the gitlink but no dlg submodule files.
+# Resolve that exact gitlink from our hash-verified supplementary source archive
+# before autogen; compilation remains offline and autogen keeps its normal copy.
+dlg_revision = "395ccad2c1e0daae535c4d20bb0a3f2424648e17"
+dlg_unpacked = recipe / "patches/freetype-dlg-unpacked"
+subprocess.run([sys.executable, str(pathlib.Path(__file__).with_name("safe_extract.py")),
+                str(dlg_file), str(dlg_unpacked)], check=True)
+dlg_roots = list(dlg_unpacked.iterdir())
+if len(dlg_roots) != 1 or not dlg_roots[0].is_dir():
+    raise ValueError("dlg archive must contain exactly one source directory")
+dlg_root = dlg_roots[0]
+for required in ("include/dlg/dlg.h", "include/dlg/output.h", "src/dlg/dlg.c"):
+    if not (dlg_root / required).is_file():
+        raise ValueError("Missing dlg submodule source: " + required)
+shutil.move(str(dlg_root), recipe / "patches/freetype-dlg")
+dlg_unpacked.rmdir()
+for stage_name in ("25-freetype", "50-freetype"):
+    relative = "scripts.d/45-fonts/" + stage_name + ".sh"
+    contents = (recipe / relative).read_text()
+    marker = "    ./autogen.sh"
+    if contents.count(marker) != 1 or 'SCRIPT_COMMIT="d333439633039de426f943f28a2926c7f97b5ae5"' not in contents:
+        raise ValueError("Pinned FreeType recipe changed: " + stage_name)
+    populate = ('    test "$(git rev-parse HEAD:subprojects/dlg)" = "' + dlg_revision + '"\n'
+                '    mkdir -p subprojects/dlg\n'
+                '    cp -a /duskcut-freetype-dlg/. subprojects/dlg/\n'
+                '    test -f subprojects/dlg/include/dlg/dlg.h\n'
+                '    test -f subprojects/dlg/include/dlg/output.h\n')
+    contents = contents.replace(marker, populate + marker)
+    contents += '\nffbuild_dockerstage() {\n    to_df "RUN --mount=src=${SELF},dst=/stage.sh --mount=src=${SELFCACHE},dst=/cache.tar.xz --mount=src=patches/freetype-dlg,dst=/duskcut-freetype-dlg run_stage /stage.sh"\n}\n'
+    replace(relative, contents)
 
 # Keep generated dependency configuration and license notices in the combined
 # prefix. Source archives are preserved separately, so no object trees are copied.

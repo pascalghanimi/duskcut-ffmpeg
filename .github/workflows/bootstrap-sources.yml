@@ -29,6 +29,9 @@ jobs:
           printf '%s  %s\n' fa2f9f26e34789bdac3563fc57872e5e2dc88970060364c502199edecf626055 downloads/source-cache.zip | sha256sum --check --strict
           gh release download sources-9.0.2-duskcut.1 --repo pascalghanimi/duskcut-ffmpeg --pattern source-bootstrap-support.zip --dir downloads
           printf '%s  %s\n' 21c5457b88a2ed9ff18176d0aa72da076cf3f2a8f28a22163c6992e36e330f5f downloads/source-bootstrap-support.zip | sha256sum --check --strict
+          mkdir published
+          gh release download sources-9.0.2-duskcut.1 --repo pascalghanimi/duskcut-ffmpeg --pattern duskcut-ffmpeg-source-supplement-dlg-395ccad2c1e0.tar --dir published
+          printf '%s  %s\n' fabaa25336bfdf71a232060b143f527dde56ee09cef5fc1505fa4bc2af19e3f0 published/duskcut-ffmpeg-source-supplement-dlg-395ccad2c1e0.tar | sha256sum --check --strict
       - name: Reconstruct and independently verify exact source asset
         run: |
           python3 build/safe_extract.py downloads/source-bootstrap-support.zip support

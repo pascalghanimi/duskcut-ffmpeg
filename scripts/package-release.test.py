@@ -41,7 +41,9 @@ class Fixture:
                     module.add_tar_file(archive, path.relative_to(self.inputs).as_posix(), path)
         release = {'schemaVersion': 1, 'sourceManifestSha256': module.digest_bytes(manifest_bytes),
                    'releaseTag': 'sources-test.1', 'extractTo': '.',
-                   'assets': [{'file': source_part.name, 'bytes': source_part.stat().st_size, 'sha256': module.digest_file(source_part)}]}
+                   'assets': [{'file': source_part.name, 'bytes': source_part.stat().st_size,
+                               'sha256': module.digest_file(source_part),
+                               'url': module.REPOSITORY + '/releases/download/sources-test.1/' + source_part.name}]}
         release_bytes = module.json_bytes(release)
         self.write(self.inputs, 'release-assets.json', release_bytes)
         for name in ('README.md', 'LICENSE', 'build/controlled-build.mjs', 'build/create-lock.mjs', 'scripts/extract-inputs.py'):
@@ -72,6 +74,14 @@ class Fixture:
         self.evidence_files = {'BUILD-RESULT.json': result_bytes, 'inputs/build-lock.json': lock_bytes,
                                'work/control/lock.json': lock_bytes,
                                **{'work/control/' + name: data for name, data in self.controls.items()}}
+        self.evidence_files.update({'work/configuration/' + name: ('Fixture evidence ' + name + '\n').encode()
+                                    for name in module.CONFIGURATION})
+        self.evidence_files.update({name: ('Fixture evidence ' + name + '\n').encode()
+                                    for name in module.BUILD_RECORDS})
+        self.evidence_files['work/configuration/profile.json'] = profile
+        self.evidence_files['work/compile-result.json'] = module.json_bytes({
+            'buildId': 'test.1', 'ffmpegRevision': 'b' * 40, 'recipeRevision': 'a' * 40,
+        })
         self.save_evidence()
 
     @staticmethod
@@ -92,6 +102,56 @@ class Fixture:
 
     def package(self):
         return module.package(self.artifact, self.inputs, self.repo, self.root / 'result', '9.0.2-test.1')
+
+    def update_lock(self, lock):
+        data = module.json_bytes(lock)
+        self.evidence_files['inputs/build-lock.json'] = data
+        self.evidence_files['work/control/lock.json'] = data
+        self.result['lockSha256'] = module.digest_bytes(data)
+        self.result['sourceInputs'] = lock['blobs']
+        data = module.json_bytes(self.result)
+        self.evidence_files['BUILD-RESULT.json'] = data
+        self.write(self.artifact, 'BUILD-RESULT.json', data)
+        self.save_evidence()
+
+    def add_supplement(self):
+        rows = []
+        revision = 'c' * 40
+        for name, role, path, data in [
+            ('freetype-dlg', 'source', 'sources/supplemental/dlg.tar.gz', b'Fixture submodule source'),
+            ('freetype-dlg-license', 'license-evidence', 'sources/notices/freetype-dlg/LICENSE', b'Fixture original license'),
+            ('freetype-dlg-review', 'review-evidence', 'sources/supplemental/README.md', b'Fixture supplement review'),
+        ]:
+            self.write(self.inputs, path, data)
+            rows.append({'id': name, 'role': role, 'file': path, 'bytes': len(data),
+                         'sha256': module.digest_bytes(data), 'revision': revision})
+        supplement = {'schemaVersion': 1, 'freetypeDlg': {'id': 'freetype-dlg', 'revision': revision,
+                        'parentRevision': 'd' * 40}, 'files': rows, 'notices': []}
+        manifest_name = 'sources/supplemental-manifest.json'
+        data = module.json_bytes(supplement)
+        self.write(self.inputs, manifest_name, data)
+        source_part = self.inputs / 'inputs-supplement.tar'
+        with tarfile.open(source_part, 'w') as archive:
+            for name in [manifest_name] + [row['file'] for row in rows]:
+                module.add_tar_file(archive, name, self.inputs / name)
+        release = module.read_json(self.inputs / 'release-assets.json')
+        release['supplementalManifestSha256'] = module.digest_bytes(data)
+        release['assets'].append({'file': source_part.name, 'bytes': source_part.stat().st_size,
+                                 'sha256': module.digest_file(source_part),
+                                 'url': module.REPOSITORY + '/releases/download/sources-test.1/' + source_part.name})
+        self.write(self.inputs, 'release-assets.json', module.json_bytes(release))
+        self.write(self.repo, 'release-assets.json', module.json_bytes(release))
+        self.git('add', 'release-assets.json')
+        self.git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--quiet', '-m', 'supplement')
+        self.revision = self.git('rev-parse', 'HEAD').decode().strip()
+        self.write(self.artifact, 'BUILD-RECIPE-COMMIT.txt', (self.revision + '\n').encode())
+        lock = json.loads(self.evidence_files['inputs/build-lock.json'])
+        lock['supplementalSourceManifest'] = {'file': manifest_name, 'sha256': module.digest_bytes(data)}
+        lock['freetypeDlg'] = {'blobId': 'freetype-dlg', 'noticeBlobId': 'freetype-dlg-license',
+                              'revision': revision, 'parentRevision': 'd' * 40}
+        lock['blobs'].extend(rows)
+        self.update_lock(lock)
+        return supplement
 
 
 class ReleaseTests(unittest.TestCase):
@@ -125,12 +185,125 @@ class ReleaseTests(unittest.TestCase):
             fixture.package()
         self.assertFalse((fixture.root / 'result').exists())
 
+    def test_supplement_binds_build_and_replay_and_preserves_runtime_license(self):
+        fixture = self.fixture
+        fixture.add_supplement()
+        candidate = fixture.package()
+        names = {row['path'] for row in candidate['files']}
+        self.assertIn('sources/notices/freetype-dlg/LICENSE', names)
+        self.assertIn('sources/supplemental-manifest.json', names)
+        self.assertIn('sources/supplemental/README.md', names)
+        with tarfile.open(fixture.root / 'result/duskcut-ffmpeg-test.1-corresponding-source.tar') as archive:
+            self.assertIn('inputs/inputs-supplement.tar', archive.getnames())
+        binding = module.read_json(fixture.root / 'result/SOURCE-BINDING.json')
+        self.assertEqual(binding['supplementalSourceManifestSha256'],
+                         module.digest_file(fixture.inputs / 'sources/supplemental-manifest.json'))
+
+    def test_unbound_changed_or_wrong_identity_supplement_rejected(self):
+        fixture = self.fixture
+        fixture.add_supplement()
+        lock = json.loads(fixture.evidence_files['inputs/build-lock.json'])
+        original = module.json_bytes(lock)
+        lock['supplementalSourceManifest']['sha256'] = '0' * 64
+        fixture.update_lock(lock)
+        with self.assertRaisesRegex(ValueError, 'Supplemental source manifest hash'):
+            fixture.package()
+        lock = json.loads(original)
+        lock['freetypeDlg']['revision'] = '0' * 40
+        fixture.update_lock(lock)
+        with self.assertRaisesRegex(ValueError, 'identity differs'):
+            fixture.package()
+        lock = json.loads(original)
+        del lock['supplementalSourceManifest']
+        fixture.update_lock(lock)
+        with self.assertRaisesRegex(ValueError, 'Unbound supplemental'):
+            fixture.package()
+        self.assertFalse((fixture.root / 'result').exists())
+
+    def test_supplement_cannot_replace_base_source_or_runtime_notice(self):
+        fixture = self.fixture
+        supplement = fixture.add_supplement()
+        base = module.read_json(fixture.inputs / 'source-manifest.json')
+        for path in ['sources/downloads/source.tar.xz', 'sources/distribution/LICENSE',
+                     'sources/README.md', 'sources/SUPPLEMENTAL-MANIFEST.json']:
+            supplement['files'][0]['file'] = path
+            data = module.json_bytes(supplement)
+            fixture.write(fixture.inputs, 'sources/supplemental-manifest.json', data)
+            with self.subTest(path=path):
+                with self.assertRaisesRegex(ValueError, 'replacing or invalid'):
+                    module.source_records(fixture.inputs, base, module.digest_bytes(data))
+
+    def test_supplement_input_part_cannot_be_missing_or_duplicate_original_file(self):
+        fixture = self.fixture
+        fixture.add_supplement()
+        release = module.read_json(fixture.inputs / 'release-assets.json')
+        release['assets'].pop()
+        fixture.write(fixture.inputs, 'release-assets.json', module.json_bytes(release))
+        with self.assertRaisesRegex(ValueError, 'full manifest and notices'):
+            module.verify_input_parts(fixture.inputs, fixture.inputs / 'source-manifest.json')
+
     def test_changed_executed_control_rejected(self):
         fixture = self.fixture
         fixture.evidence_files['work/control/container-compile.sh'] = b'# different command\n'
         fixture.save_evidence()
         with self.assertRaisesRegex(ValueError, 'Executed build control differs'):
             fixture.package()
+
+    def test_missing_or_empty_configuration_and_build_records_rejected(self):
+        fixture = self.fixture
+        for name in tuple('work/configuration/' + item for item in module.CONFIGURATION) + module.BUILD_RECORDS:
+            original = fixture.evidence_files.pop(name)
+            with self.subTest(name=name):
+                fixture.save_evidence()
+                with self.assertRaisesRegex(ValueError, 'required build evidence'):
+                    fixture.package()
+                if name not in module.EMPTY_LOGS_ALLOWED:
+                    fixture.evidence_files[name] = b''
+                    fixture.save_evidence()
+                    with self.assertRaisesRegex(ValueError, 'required build evidence'):
+                        fixture.package()
+            fixture.evidence_files[name] = original
+        self.assertFalse((fixture.root / 'result').exists())
+
+    def test_successful_generation_can_have_an_empty_but_present_log(self):
+        fixture = self.fixture
+        fixture.evidence_files['work/generate.log'] = b''
+        fixture.save_evidence()
+        self.assertEqual(fixture.package()['approvalStatus'], 'candidate-awaiting-review')
+
+    def test_generated_profile_and_compile_identity_must_match(self):
+        fixture = self.fixture
+        original = fixture.evidence_files['work/configuration/profile.json']
+        fixture.evidence_files['work/configuration/profile.json'] = b'{"id": "different"}\n'
+        fixture.save_evidence()
+        with self.assertRaisesRegex(ValueError, 'configuration profile differs'):
+            fixture.package()
+        fixture.evidence_files['work/configuration/profile.json'] = original
+        fixture.evidence_files['work/compile-result.json'] = module.json_bytes({
+            'buildId': 'different-build', 'ffmpegRevision': 'b' * 40, 'recipeRevision': 'a' * 40,
+        })
+        fixture.save_evidence()
+        with self.assertRaisesRegex(ValueError, 'Compile-stage result differs'):
+            fixture.package()
+
+    def test_source_part_replay_metadata_is_required(self):
+        fixture = self.fixture
+        release = module.read_json(fixture.inputs / 'release-assets.json')
+        original = module.json_bytes(release)
+        for key, value in [('extractTo', 'elsewhere'), ('releaseTag', 'latest')]:
+            with self.subTest(key=key):
+                changed = json.loads(original)
+                changed[key] = value
+                fixture.write(fixture.inputs, 'release-assets.json', module.json_bytes(changed))
+                with self.assertRaisesRegex(ValueError, 'cannot be replayed'):
+                    module.verify_input_parts(fixture.inputs, fixture.inputs / 'source-manifest.json')
+        for value in [None, 'https://example.invalid/source.tar', release['assets'][0]['url'] + '?secret=123']:
+            with self.subTest(url=value):
+                changed = json.loads(original)
+                changed['assets'][0]['url'] = value
+                fixture.write(fixture.inputs, 'release-assets.json', module.json_bytes(changed))
+                with self.assertRaisesRegex(ValueError, 'Source asset URL'):
+                    module.verify_input_parts(fixture.inputs, fixture.inputs / 'source-manifest.json')
 
     def test_changed_staged_source_rejected(self):
         fixture = self.fixture

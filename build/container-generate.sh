@@ -8,16 +8,16 @@ mapfile -t fields < <(python3 - <<'PY'
 import json
 lock=json.load(open('/work/control/lock.json'))
 blobs={b['id']:b for b in lock['blobs']}
-for key in ('recipe','oneVplPatch'):
+for key in ('recipe','oneVplPatch','freetypeDlg'):
     print('/inputs/'+blobs[lock[key]['blobId']]['file'])
 PY
 )
-[[ ${#fields[@]} == 2 ]]
+[[ ${#fields[@]} == 3 ]]
 python3 control/safe_extract.py "${fields[0]}" recipe-unpacked
 mapfile -t roots < <(find recipe-unpacked -mindepth 1 -maxdepth 1 -type d)
 [[ ${#roots[@]} == 1 ]]
 mv "${roots[0]}" recipe
-python3 control/prepare_recipe.py recipe control/profile.json "${fields[1]}" configuration
+python3 control/prepare_recipe.py recipe control/profile.json "${fields[1]}" "${fields[2]}" configuration
 python3 - <<'PY'
 import json,pathlib,shutil
 l=json.load(open('/work/control/lock.json'))
