@@ -1,0 +1,17 @@
+name: Verify archived upstream source access
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Download fixed public upstream archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api repos/BtbN/FFmpeg-Builds/actions/artifacts/10931492582/zip > source-cache.zip
+          printf '%s  %s\n' fa2f9f26e34789bdac3563fc57872e5e2dc88970060364c502199edecf626055 source-cache.zip | sha256sum --check --strict
