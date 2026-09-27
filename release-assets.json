@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "releaseTag": "sources-9.0.2-duskcut.1",
+  "extractTo": ".",
+  "sourceManifestSha256": "5ec9c1f5993c28156c680b8e5f9e35b33da29a6fb74cde653814cc8416764aec",
+  "assets": [
+    {
+      "file": "duskcut-ffmpeg-source-inputs-9.0.2-1-part01.tar",
+      "bytes": 744173568,
+      "sha256": "e996b20b3583f2b0aef8919641de9be1df7ce13178383865c9573c38a3a58f65",
+      "fileCount": 253,
+      "url": "https://github.com/pascalghanimi/duskcut-ffmpeg/releases/download/sources-9.0.2-duskcut.1/duskcut-ffmpeg-source-inputs-9.0.2-1-part01.tar"
+    }
+  ]
+}

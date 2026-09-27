@@ -1,0 +1,91 @@
+name: Controlled Windows FFmpeg build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: controlled-ffmpeg-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    env:
+      DOCKER_BUILDKIT: '1'
+    steps:
+      - name: Check out fixed build instructions
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up orchestration runtime
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+
+      - name: Test input and build boundaries
+        run: |
+          node --test scripts/*.test.mjs build/*.test.mjs
+          python3 scripts/extract-inputs.test.py
+          python3 -m unittest discover -s build -p '*_test.py'
+          df -h .
+          docker version
+
+      - name: Fetch and verify fixed public source inputs
+        run: |
+          node scripts/fetch-inputs.mjs release-assets.json downloads
+          python3 scripts/extract-inputs.py release-assets.json downloads input-data
+          node build/create-lock.mjs input-data 9.0.2-duskcut.1
+
+      - name: Pull exact compiler environment
+        run: |
+          image="$(node -p "JSON.parse(require('fs').readFileSync('input-data/build-lock.json','utf8')).toolchain.image")"
+          docker pull "$image"
+
+      - name: Compile dependencies and FFmpeg without network
+        run: node build/controlled-build.mjs input-data/build-lock.json out
+
+      - name: Record build recipe identity
+        if: always()
+        run: |
+          mkdir -p out
+          git rev-parse HEAD > out/BUILD-RECIPE-COMMIT.txt
+          git status --porcelain --untracked-files=no > out/BUILD-RECIPE-STATUS.txt
+
+      - name: Retain binaries and correspondence evidence
+        if: success()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: duskcut-ffmpeg-9.0.2-duskcut.1-${{ github.run_id }}
+          path: |
+            out/BUILD-RESULT.json
+            out/BUILD-RECIPE-COMMIT.txt
+            out/BUILD-RECIPE-STATUS.txt
+            out/SHA256SUMS.txt
+            out/ffmpeg-build-evidence.tar.xz
+            out/work/binary/bin/ffmpeg.exe
+            out/work/binary/bin/ffprobe.exe
+            out/work/configuration/
+            out/work/compile-result.json
+            out/work/selected-source-cache-files.txt
+            out/work/toolchain-image.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+      - name: Retain build diagnostics
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: diagnostics-${{ github.run_id }}
+          path: |
+            out/work/*.log
+            out/work/recipe/Dockerfile.duskcut
+            out/work/configuration/
+            out/BUILD-RECIPE-COMMIT.txt
+          if-no-files-found: ignore
+          retention-days: 14
