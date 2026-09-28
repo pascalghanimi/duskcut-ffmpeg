@@ -26,22 +26,23 @@ function wavePayload(bytes) {
 }
 const fixtures = [
   { name: 'h264-420', video: true, codec: 'h264_mf', encode: ['-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-bf', '3'] },
-  { name: 'h264-422-10bit', video: true, codec: 'h264_mf', encode: ['-c:v', 'libx264', '-pix_fmt', 'yuv422p10le'] },
+  { name: 'h264-422-10bit', video: true, codec: 'h264_mf', unsupported: true, encode: ['-c:v', 'libx264', '-pix_fmt', 'yuv422p10le'] },
   { name: 'hevc-main', video: true, codec: 'hevc_mf', encode: ['-c:v', 'libx265', '-pix_fmt', 'yuv420p', '-x265-params', 'log-level=error:pools=2'] },
   { name: 'hevc-main10', video: true, codec: 'hevc_mf', encode: ['-c:v', 'libx265', '-pix_fmt', 'yuv420p10le', '-x265-params', 'log-level=error:pools=2'] },
   { name: 'aac-stereo-48000', rate: 48000, channels: 2 },
   { name: 'aac-mono-44100', rate: 44100, channels: 1 },
   { name: 'aac-surround-48000', rate: 48000, channels: 6 },
   { name: 'aac-adts-48000', rate: 48000, channels: 2, adts: true },
+  { name: 'aac-latm-48000', rate: 48000, channels: 2, latm: true, codec: 'aac_latm_mf' },
 ]
 const results = []
 for (const f of fixtures) {
   if (process.argv[5] && !process.argv[5].split(',').includes(f.name)) continue
-  const path = resolve(root, f.name + (f.adts ? '.aac' : '.mp4'))
+  const path = resolve(root, f.name + (f.adts ? '.aac' : f.latm ? '.ts' : '.mp4'))
   if (!existsSync(path)) {
     const args = f.video
       ? ['-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=30', '-t', '2.2', ...f.encode, path]
-      : ['-f', 'lavfi', '-i', `aevalsrc=0.25*sin(2*PI*(440+200*t)*t):s=${f.rate}:d=2.2`, '-ac', String(f.channels), '-c:a', 'aac', '-b:a', f.channels > 2 ? '384k' : '160k', path]
+      : ['-f', 'lavfi', '-i', `aevalsrc=0.25*sin(2*PI*(440+200*t)*t):s=${f.rate}:d=2.2`, '-ac', String(f.channels), '-c:a', 'aac', '-b:a', f.channels > 2 ? '384k' : '160k', ...(f.latm ? ['-mpegts_flags', '+latm'] : []), path]
     const made = invoke(reference, args)
     if (!made.ok) throw new Error(`Fixture ${f.name}: ${made.stderr}`)
   }
@@ -75,8 +76,12 @@ for (const f of fixtures) {
       }
       row.videoMaxError = maxError; row.differingSamples = count
     }
+    row.passed = native.ok && (f.unsupported
+      ? !system.ok && !system.error && system.bytes.length === 0 && /DUSKCUT_MF_PROFILE_UNSUPPORTED/.test(system.stderr)
+      : system.ok && native.bytes.length === system.bytes.length && (f.video ? row.identical : row.audioRmse < 0.0001))
     results.push(row)
     console.log(JSON.stringify(row))
   }
 }
 writeFileSync(resolve(root, 'results.json'), JSON.stringify({ candidate, reference, results }, null, 2) + '\n')
+if (results.some((row) => !row.passed)) process.exitCode = 1

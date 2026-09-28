@@ -26,6 +26,7 @@
 #include "libavutil/channel_layout.h"
 #include "libavutil/imgutils.h"
 #include "libavutil/intreadwrite.h"
+#include "libavutil/mastering_display_metadata.h"
 #include "libavutil/pixdesc.h"
 
 #define MF_TIME_BASE ((AVRational){ 1, 10000000 })
@@ -49,7 +50,162 @@ typedef struct MFDecodeContext {
     enum AVSampleFormat sample_format;
     int sample_rate, channels;
     uint32_t channel_mask;
+    AVMasteringDisplayMetadata mastering;
+    AVContentLightMetadata content_light;
+    int has_content_light;
 } MFDecodeContext;
+
+/* Windows SDK mfapi.h defines these, but not every MinGW snapshot does.
+ * These are attribute identifiers, not imported codec functions. */
+static const GUID duskcut_mf_max_cll =
+    {0x50253128,0xc110,0x4de4,{0x98,0xae,0x46,0xa3,0x24,0xfa,0xe6,0xda}};
+static const GUID duskcut_mf_max_fall =
+    {0x58d4bf57,0x6f52,0x4733,{0xa1,0x95,0xa9,0xe2,0x9e,0xcf,0x9e,0x27}};
+static const GUID duskcut_mf_max_mastering =
+    {0xd6c6b997,0x272f,0x4ca1,{0x8d,0x00,0x80,0x42,0x11,0x1a,0x0f,0xf6}};
+static const GUID duskcut_mf_min_mastering =
+    {0x839a4460,0x4e7e,0x4b4f,{0xae,0x79,0xcc,0x08,0x90,0x5c,0x7b,0x27}};
+
+/* MF enumeration values are NOT ISO/AVColor* values. Use the published numeric
+ * values so newer enum members also compile with older MinGW headers. Unknown
+ * information stays unknown; it must never silently become BT.709. */
+static enum AVColorPrimaries mf_color_primaries(UINT32 value)
+{
+    switch (value) {
+    case 2: return AVCOL_PRI_BT709;
+    case 3: return AVCOL_PRI_BT470M;
+    case 4: return AVCOL_PRI_BT470BG;
+    case 5: case 8: return AVCOL_PRI_SMPTE170M;
+    case 6: return AVCOL_PRI_SMPTE240M;
+    case 7: return AVCOL_PRI_JEDEC_P22;
+    case 9: return AVCOL_PRI_BT2020;
+    case 10: return AVCOL_PRI_SMPTE428;
+    case 11: return AVCOL_PRI_SMPTE431;
+    case 13: return AVCOL_PRI_SMPTE432;
+    default: return AVCOL_PRI_UNSPECIFIED;
+    }
+}
+
+static enum AVColorTransferCharacteristic mf_color_transfer(UINT32 value)
+{
+    switch (value) {
+    case 1: return AVCOL_TRC_LINEAR;
+    case 4: return AVCOL_TRC_GAMMA22;
+    case 5: return AVCOL_TRC_BT709;
+    case 6: return AVCOL_TRC_SMPTE240M;
+    case 7: return AVCOL_TRC_IEC61966_2_1;
+    case 8: return AVCOL_TRC_GAMMA28;
+    case 9: return AVCOL_TRC_LOG;
+    case 10: return AVCOL_TRC_LOG_SQRT;
+    case 13: return AVCOL_TRC_BT2020_10;
+    case 15: return AVCOL_TRC_SMPTE2084;
+    case 16: return AVCOL_TRC_ARIB_STD_B67;
+    case 18: return AVCOL_TRC_BT1361_ECG;
+    case 19: return AVCOL_TRC_SMPTE428;
+    default: return AVCOL_TRC_UNSPECIFIED;
+    }
+}
+
+static enum AVColorSpace mf_color_matrix(UINT32 value)
+{
+    switch (value) {
+    case 1: return AVCOL_SPC_BT709;
+    case 2: return AVCOL_SPC_SMPTE170M; /* BT.601 has the same matrix. */
+    case 3: return AVCOL_SPC_SMPTE240M;
+    case 4: case 5: return AVCOL_SPC_BT2020_NCL;
+    case 6: return AVCOL_SPC_RGB;
+    case 7: return AVCOL_SPC_FCC;
+    case 8: return AVCOL_SPC_YCGCO;
+    case 9: return AVCOL_SPC_SMPTE2085;
+    case 10: return AVCOL_SPC_CHROMA_DERIVED_NCL;
+    case 11: return AVCOL_SPC_CHROMA_DERIVED_CL;
+    case 12: return AVCOL_SPC_ICTCP;
+    default: return AVCOL_SPC_UNSPECIFIED;
+    }
+}
+
+static void mf_read_video_metadata(AVCodecContext *avctx, IMFMediaType *type)
+{
+    MFDecodeContext *c = avctx->priv_data;
+    UINT32 value, num, den, minimum, maximum, size = 0;
+    MT_CUSTOM_VIDEO_PRIMARIES primaries;
+    enum AVColorPrimaries pri;
+    enum AVColorTransferCharacteristic trc;
+    enum AVColorSpace matrix;
+
+    /* Preserve explicit container metadata if the transform omits an attribute. */
+    if (SUCCEEDED(IMFMediaType_GetUINT32(type, &MF_MT_VIDEO_PRIMARIES, &value)) &&
+        (pri = mf_color_primaries(value)) != AVCOL_PRI_UNSPECIFIED)
+        avctx->color_primaries = pri;
+    if (SUCCEEDED(IMFMediaType_GetUINT32(type, &MF_MT_TRANSFER_FUNCTION, &value)) &&
+        (trc = mf_color_transfer(value)) != AVCOL_TRC_UNSPECIFIED)
+        avctx->color_trc = trc;
+    if (SUCCEEDED(IMFMediaType_GetUINT32(type, &MF_MT_YUV_MATRIX, &value)) &&
+        (matrix = mf_color_matrix(value)) != AVCOL_SPC_UNSPECIFIED)
+        avctx->colorspace = matrix;
+    if (SUCCEEDED(IMFMediaType_GetUINT32(type, &MF_MT_VIDEO_NOMINAL_RANGE, &value))) {
+        if (value == 1) avctx->color_range = AVCOL_RANGE_JPEG; /* 0..255 */
+        if (value == 2) avctx->color_range = AVCOL_RANGE_MPEG; /* 16..235 */
+    }
+    if (SUCCEEDED(ff_MFGetAttributeRatio((IMFAttributes *)type,
+            &MF_MT_PIXEL_ASPECT_RATIO, &num, &den)) && num && den)
+        av_reduce(&avctx->sample_aspect_ratio.num, &avctx->sample_aspect_ratio.den,
+                  num, den, INT_MAX);
+
+    memset(&c->mastering, 0, sizeof(c->mastering));
+    c->has_content_light = 0;
+    if (SUCCEEDED(IMFMediaType_GetBlob(type, &MF_MT_CUSTOM_VIDEO_PRIMARIES,
+            (UINT8 *)&primaries, sizeof(primaries), &size)) && size == sizeof(primaries)) {
+        const float xy[8] = { primaries.fRx, primaries.fRy, primaries.fGx, primaries.fGy,
+                              primaries.fBx, primaries.fBy, primaries.fWx, primaries.fWy };
+        int valid = 1;
+        for (int i = 0; i < 8; i++)
+            if (!(xy[i] >= 0.0f && xy[i] <= 1.0f)) valid = 0; /* also rejects NaN */
+        for (int i = 0; i < 4; i++)
+            if (!(xy[2*i] + xy[2*i+1] > 0.0f && xy[2*i] + xy[2*i+1] <= 1.0f)) valid = 0;
+        if (valid) {
+            for (int i = 0; i < 3; i++) for (int j = 0; j < 2; j++)
+                c->mastering.display_primaries[i][j] = av_d2q(xy[2*i+j], 50000);
+            c->mastering.white_point[0] = av_d2q(xy[6], 50000);
+            c->mastering.white_point[1] = av_d2q(xy[7], 50000);
+            c->mastering.has_primaries = 1;
+        }
+    }
+    /* SDK units: maximum is whole nits; minimum is 0.0001 nits. */
+    if (SUCCEEDED(IMFMediaType_GetUINT32(type, &duskcut_mf_max_mastering, &maximum)) &&
+        SUCCEEDED(IMFMediaType_GetUINT32(type, &duskcut_mf_min_mastering, &minimum)) &&
+        maximum > 0 && maximum <= INT_MAX && minimum <= (uint64_t)maximum * 10000) {
+        c->mastering.max_luminance = (AVRational){ maximum, 1 };
+        av_reduce(&c->mastering.min_luminance.num, &c->mastering.min_luminance.den,
+                  minimum, 10000, INT_MAX);
+        c->mastering.has_luminance = 1;
+    }
+    if (SUCCEEDED(IMFMediaType_GetUINT32(type, &duskcut_mf_max_cll, &maximum)) &&
+        SUCCEEDED(IMFMediaType_GetUINT32(type, &duskcut_mf_max_fall, &minimum)) &&
+        maximum <= 65535 && minimum <= 65535) {
+        c->content_light.MaxCLL = maximum;
+        c->content_light.MaxFALL = minimum;
+        c->has_content_light = 1;
+    }
+}
+
+static int mf_apply_hdr_metadata(MFDecodeContext *c, AVFrame *frame)
+{
+    /* Prefer matching packet/container side data. Only supplement information
+     * the MFT actually exposed; absent HDR metadata is not reconstructed. */
+    if ((c->mastering.has_primaries || c->mastering.has_luminance) &&
+        !av_frame_get_side_data(frame, AV_FRAME_DATA_MASTERING_DISPLAY_METADATA)) {
+        AVMasteringDisplayMetadata *metadata = av_mastering_display_metadata_create_side_data(frame);
+        if (!metadata) return AVERROR(ENOMEM);
+        *metadata = c->mastering;
+    }
+    if (c->has_content_light && !av_frame_get_side_data(frame, AV_FRAME_DATA_CONTENT_LIGHT_LEVEL)) {
+        AVContentLightMetadata *metadata = av_content_light_metadata_create_side_data(frame);
+        if (!metadata) return AVERROR(ENOMEM);
+        *metadata = c->content_light;
+    }
+    return 0;
+}
 
 static int mf_error(AVCodecContext *avctx, const char *operation, HRESULT hr)
 {
@@ -194,6 +350,14 @@ static int mf_choose_output(AVCodecContext *avctx)
                 hr = IMFTransform_SetOutputType(c->mft, c->output_id, type, 0);
                 IMFMediaType_Release(type);
                 if (SUCCEEDED(hr)) {
+                    if (!c->audio) {
+                        IMFMediaType *current = NULL;
+                        /* Read negotiated attributes, not the enumerated proposal. */
+                        if (SUCCEEDED(IMFTransform_GetOutputCurrentType(c->mft, c->output_id, &current))) {
+                            mf_read_video_metadata(avctx, current);
+                            IMFMediaType_Release(current);
+                        }
+                    }
                     hr = IMFTransform_GetOutputStreamInfo(c->mft, c->output_id, &c->output_info);
                     return SUCCEEDED(hr) ? 0 : mf_error(avctx, "output buffer negotiation", hr);
                 }
@@ -203,6 +367,34 @@ static int mf_choose_output(AVCodecContext *avctx)
         }
     }
     return mf_error(avctx, "decoder output negotiation", hr);
+}
+
+/* Read only LATM transport configuration. Compressed audio always stays in the
+ * Windows transform. One program/layer is also the Windows decoder's limit. */
+static int mf_latm_config(AVCodecContext *avctx, const AVPacket *packet, MPEG4AudioConfig *config)
+{
+    GetBitContext gb;
+    int version, bytes;
+    if (packet->size < 8 || AV_RB24(packet->data) >> 13 != 0x2b7 ||
+        init_get_bits8(&gb, packet->data, packet->size) < 0)
+        return AVERROR_INVALIDDATA;
+    skip_bits(&gb, 24);
+    if (get_bits1(&gb)) return AVERROR_INVALIDDATA; /* No StreamMuxConfig yet. */
+    version = get_bits1(&gb);
+    if (version) {
+        if (get_bits1(&gb)) return AVERROR(ENOSYS); /* audioMuxVersionA */
+        bytes = get_bits(&gb, 2) + 1;
+        if (get_bits_left(&gb) < bytes * 8 + 14) return AVERROR_INVALIDDATA;
+        skip_bits_long(&gb, bytes * 8); /* taraBufferFullness */
+    }
+    skip_bits(&gb, 7); /* allStreamsSameTimeFraming, numSubFrames */
+    if (get_bits(&gb, 4) || get_bits(&gb, 3)) return AVERROR(ENOSYS);
+    if (version) {
+        bytes = get_bits(&gb, 2) + 1;
+        if (get_bits_left(&gb) < bytes * 8 + 16) return AVERROR_INVALIDDATA;
+        skip_bits_long(&gb, bytes * 8); /* ASC length, MFT consumes complete config. */
+    }
+    return ff_mpeg4audio_get_config_gb(config, &gb, 0, avctx);
 }
 
 static int mf_set_input(AVCodecContext *avctx, const AVPacket *packet)
@@ -260,8 +452,21 @@ static int mf_set_input(AVCodecContext *avctx, const AVPacket *packet)
          * every compressed sample. ADTS stores its AudioSpecificConfig on the
          * first output packet rather than in the container codec parameters. */
         if (packet_extra && packet_extra_size) {
-            extra = packet_extra;
-            extra_size = packet_extra_size;
+            if (packet_extra_size > 65536) { ret = AVERROR_INVALIDDATA; goto done; }
+            /* Stream-info probing creates a temporary decoder. Publish the
+             * transport-derived ASC so later seek/export decoder contexts have
+             * the same initialization data, not only the very first packet. */
+            if (packet_extra_size != avctx->extradata_size ||
+                !avctx->extradata || memcmp(avctx->extradata, packet_extra, packet_extra_size)) {
+                uint8_t *copy = av_mallocz(packet_extra_size + AV_INPUT_BUFFER_PADDING_SIZE);
+                if (!copy) { ret = AVERROR(ENOMEM); goto done; }
+                memcpy(copy, packet_extra, packet_extra_size);
+                av_freep(&avctx->extradata);
+                avctx->extradata = copy;
+                avctx->extradata_size = packet_extra_size;
+            }
+            extra = avctx->extradata;
+            extra_size = avctx->extradata_size;
         }
         if (payload == 1 && packet->size >= AV_AAC_ADTS_HEADER_SIZE) {
             AACADTSHeaderInfo header;
@@ -279,19 +484,25 @@ static int mf_set_input(AVCodecContext *avctx, const AVPacket *packet)
             rate = config.sample_rate;
             channels = config.channels;
         }
+        if (payload == 3 && packet && mf_latm_config(avctx, packet, &config) >= 0) {
+            rate = config.sample_rate;
+            channels = config.channels;
+        }
         SET_ATTR(IMFMediaType_SetUINT32(type, &MF_MT_AAC_PAYLOAD_TYPE, payload));
         SET_ATTR(IMFMediaType_SetUINT32(type, &MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION, 0xfe));
         if (rate > 0) SET_ATTR(IMFMediaType_SetUINT32(type, &MF_MT_AUDIO_SAMPLES_PER_SECOND, rate));
         if (channels > 0) SET_ATTR(IMFMediaType_SetUINT32(type, &MF_MT_AUDIO_NUM_CHANNELS, channels));
         SET_ATTR(IMFMediaType_SetUINT32(type, &MF_MT_AUDIO_BITS_PER_SAMPLE, 32));
-        if (!payload && extra_size > 0) {
+        if (payload || extra_size > 0) {
             uint8_t *user_data;
-            user_data = av_mallocz(12 + extra_size);
+            const size_t asc_size = payload ? 0 : extra_size;
+            user_data = av_mallocz(12 + asc_size);
             if (!user_data) { ret = AVERROR(ENOMEM); goto done; }
             /* HEAACWAVEINFO after WAVEFORMATEX, followed by AudioSpecificConfig. */
+            AV_WL16(user_data, payload);
             AV_WL16(user_data + 2, 0xfe);
-            memcpy(user_data + 12, extra, extra_size);
-            hr = IMFMediaType_SetBlob(type, &MF_MT_USER_DATA, user_data, 12 + extra_size);
+            if (asc_size) memcpy(user_data + 12, extra, asc_size);
+            hr = IMFMediaType_SetBlob(type, &MF_MT_USER_DATA, user_data, 12 + asc_size);
             av_free(user_data);
             if (FAILED(hr)) goto fail;
         }
@@ -387,6 +598,10 @@ static int mf_copy_sample(AVCodecContext *avctx, IMFSample *sample, AVFrame *fra
         ? av_rescale_q(time, MF_TIME_BASE, mf_packet_time_base(avctx)) : AV_NOPTS_VALUE;
     ret = mf_apply_properties(avctx, frame, frame->pts);
     if (ret < 0) goto done;
+    if (!c->audio) {
+        ret = mf_apply_hdr_metadata(c, frame);
+        if (ret < 0) goto done;
+    }
     if (SUCCEEDED(IMFSample_GetSampleDuration(sample, &time)))
         frame->duration = av_rescale_q(time, MF_TIME_BASE, mf_packet_time_base(avctx));
     else if (c->audio)
