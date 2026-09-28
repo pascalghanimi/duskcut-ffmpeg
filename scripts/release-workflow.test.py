@@ -53,6 +53,15 @@ class PrepareTests(IsolatedTest):
                        'url': f'https://github.com/{prepare.REPO}/releases/download/sources-test.1/input.tar'}]}
         self.calls = []
         self.artifact_commit = 'a' * 40
+        self.result = {'buildId': 'test.1', 'lockSha256': 'b' * 64,
+                       'binaryHashes': {'ffmpeg.exe': 'c' * 64, 'ffprobe.exe': 'd' * 64}}
+        self.review_source = pathlib.Path('public-source/runtime-review/test.1')
+        self.review_source.mkdir(parents=True)
+        (self.review_source / 'README.md').write_bytes(b'fixture review')
+        self.review = {'schemaVersion': 1, 'buildId': 'test.1', 'buildLockSha256': self.result['lockSha256'],
+            'binaryHashes': self.result['binaryHashes'], 'files': [{'file': 'README.md', 'bytes': 14,
+            'sha256': hashlib.sha256(b'fixture review').hexdigest(), 'role': 'review', 'id': 'readme'}]}
+        (self.review_source / 'runtime-review.json').write_bytes(encoded(self.review))
 
     def check_output(self, args, **kwargs):
         self.calls.append(args)
@@ -68,6 +77,7 @@ class PrepareTests(IsolatedTest):
         self.assertTrue(kwargs.get('check'))
         if args[:3] == ['gh', 'run', 'download']:
             pathlib.Path('build-artifact/BUILD-RECIPE-COMMIT.txt').write_text(self.artifact_commit)
+            pathlib.Path('build-artifact/BUILD-RESULT.json').write_bytes(encoded(self.result))
         elif args[:2] == ['node', 'scripts/fetch-inputs.mjs']:
             pathlib.Path('downloads').mkdir()
             pathlib.Path('downloads/input.tar').write_bytes(b'test')
@@ -85,6 +95,8 @@ class PrepareTests(IsolatedTest):
         self.execute()
         self.assertEqual(json.loads(pathlib.Path('source-staging/release-assets.json').read_text()), self.manifest)
         self.assertEqual(pathlib.Path('source-staging/input.tar').read_bytes(), b'test')
+        self.assertEqual(pathlib.Path('runtime-review/README.md').read_bytes(), b'fixture review')
+        self.assertEqual(json.loads(pathlib.Path('runtime-review/runtime-review.json').read_text()), self.review)
         self.assertIn(['git', 'merge-base', '--is-ancestor', 'a' * 40, 'HEAD'], self.calls)
 
     def test_invalid_run_id_fails_before_any_command(self):
@@ -137,6 +149,41 @@ class PrepareTests(IsolatedTest):
         changed['assets'].append(copy.deepcopy(changed['assets'][0]))
         with self.assertRaises(ValueError):
             prepare.validate_manifest(changed)
+
+    def test_runtime_review_selection_rejects_wrong_build_or_modified_manifest_paths(self):
+        artifact = pathlib.Path('artifact')
+        artifact.mkdir()
+        (artifact / 'BUILD-RESULT.json').write_bytes(encoded(self.result))
+        original = encoded(self.review)
+        for key, value in [('buildId', 'another'), ('buildLockSha256', '0' * 64), ('binaryHashes', {})]:
+            changed = json.loads(original)
+            changed[key] = value
+            (self.review_source / 'runtime-review.json').write_bytes(encoded(changed))
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, 'another build'):
+                prepare.copy_runtime_review(artifact)
+        changed = json.loads(original)
+        changed['files'][0]['file'] = '../outside.txt'
+        (self.review_source / 'runtime-review.json').write_bytes(encoded(changed))
+        with self.assertRaisesRegex(ValueError, 'Unsafe or duplicate'):
+            prepare.copy_runtime_review(artifact)
+        self.assertFalse(pathlib.Path('runtime-review').exists())
+
+    def test_runtime_review_missing_changed_or_extra_file_fails_before_copy(self):
+        artifact = pathlib.Path('artifact')
+        artifact.mkdir()
+        (artifact / 'BUILD-RESULT.json').write_bytes(encoded(self.result))
+        (self.review_source / 'README.md').write_bytes(b'changed review')
+        with self.assertRaisesRegex(ValueError, 'SHA-256 differs'):
+            prepare.copy_runtime_review(artifact)
+        (self.review_source / 'README.md').write_bytes(b'fixture review')
+        (self.review_source / 'extra.txt').write_text('unexpected')
+        with self.assertRaisesRegex(ValueError, 'Unexpected'):
+            prepare.copy_runtime_review(artifact)
+        (self.review_source / 'extra.txt').unlink()
+        (self.review_source / 'README.md').unlink()
+        with self.assertRaisesRegex(ValueError, 'size or type'):
+            prepare.copy_runtime_review(artifact)
+        self.assertFalse(pathlib.Path('runtime-review').exists())
 
 
 class UploadTests(IsolatedTest):

@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import pathlib
+import posixpath
 import re
 import subprocess
 import tarfile
@@ -44,6 +45,12 @@ TOKEN = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.+-]{0,149}')
 SECRET = re.compile(rb'(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}'
                     rb'|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----'
                     rb'|[?&](?:X-Amz-Signature|sig|signature)=[A-Za-z0-9%+/]{16,})', re.I)
+# Reviewed public security test in build commit 323eb1d63d630b4bd4e8ae4c89650266534731e8.
+# Contains deliberate placeholder strings and a bare PRIVATE KEY header, no key data.
+# Only this exact path AND every original byte are exempt; no generic test-file skip.
+AUDITED_TEST_FIXTURES = {
+    'build/capture_environment_test.py': 'c46a784627045481a4698bac7f67b31cd0ddfae5a0fedef9e5c2ca87042f30e2',
+}
 
 
 def digest_bytes(data):
@@ -158,7 +165,8 @@ def repository_snapshot(repository, revision):
                         or name in ('LICENSE', '.gitattributes', '.gitignore'))):
             raise ValueError('Unexpected tracked build-recipe file: ' + name)
         data = subprocess.check_output(['git', '-C', str(repository), 'show', revision + ':' + name])
-        if len(data) > 8 * 1024 ** 2 or SECRET.search(data):
+        audited_fixture = AUDITED_TEST_FIXTURES.get(name) == digest_bytes(data)
+        if len(data) > 8 * 1024 ** 2 or (SECRET.search(data) and not audited_fixture):
             raise ValueError('Unreviewed or oversized repository content: ' + name)
         files[name] = data
     required = ['build/controlled-build.mjs', 'build/create-lock.mjs', 'scripts/extract-inputs.py']
@@ -361,6 +369,104 @@ def verify_input_parts(inputs, manifest_path):
     return release_path, parts
 
 
+def verify_runtime_review(review_directory, result, revision, evidence_path):
+    """Bind supplementary post-build runtime-license evidence, never amend locked inputs."""
+    with tarfile.open(evidence_path, 'r:*') as evidence:
+        members = archive_files(evidence)
+        compile_log = member_bytes(evidence, members, 'work/ffmpeg-build.log')
+        # Preserve the actual linker path. Lexical '..' normalization can change
+        # which file is selected when an earlier directory is a symlink. The audit
+        # resolves and hashes this exact path inside the original pinned image.
+        linked_paths = {line.strip() for line in compile_log.decode('utf-8', errors='replace').splitlines()
+                        if re.fullmatch(r'/opt/ct-ng/[^\s]+\.a', line.strip())}
+        needs_review = b'libatomic.a' in compile_log or b'-latomic' in compile_log
+        if review_directory is None:
+            if needs_review:
+                raise ValueError('Linked libatomic requires bound post-build runtime review evidence')
+            return None
+        if not needs_review:
+            raise ValueError('Runtime review supplied without a corresponding libatomic link record')
+        lock = json.loads(member_bytes(evidence, members, 'inputs/build-lock.json'))
+        toolchain = json.loads(member_bytes(evidence, members, 'work/toolchain-image.json'))
+        compiler_version = member_bytes(evidence, members, 'work/configuration/compiler-version.txt').decode().splitlines()[0]
+    root = pathlib.Path(review_directory)
+    manifest_path = regular(root, 'runtime-review.json')
+    if manifest_path.stat().st_size > 1024 ** 2:
+        raise ValueError('Oversized runtime review manifest')
+    manifest = read_json(manifest_path)
+    if (manifest.get('schemaVersion') != 1 or manifest.get('buildId') != result['buildId']
+            or manifest.get('buildLockSha256') != result['lockSha256']
+            or manifest.get('binaryHashes') != result['binaryHashes']
+            or manifest.get('compilerImage') != lock.get('toolchain', {}).get('image')
+            or manifest.get('compilerImage') != toolchain.get('reference')
+            or not re.fullmatch(r'ghcr\.io/[a-z0-9/_.-]+@sha256:[a-f0-9]{64}', manifest.get('compilerImage', ''))):
+        raise ValueError('Runtime review is not bound to this build, binaries and compiler image')
+    rows = manifest.get('files')
+    if not isinstance(rows, list) or not rows or len(rows) > 20:
+        raise ValueError('Invalid runtime review file inventory')
+    paths, records, seen_ids, total = {'runtime-review.json': manifest_path}, {}, set(), 0
+    for row in rows:
+        name = safe_name(row.get('file'))
+        if (not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,119}\.(?:txt|md|json)', name)
+                or name.casefold() in {path.casefold() for path in paths}
+                or not isinstance(row.get('id'), str) or not row['id'] or row['id'] in seen_ids
+                or row.get('role') not in ('license', 'source-header', 'linkage-evidence', 'review')):
+            raise ValueError('Unsafe or duplicate runtime review file')
+        path = regular(root, name)
+        verify_identity(path, row.get('bytes'), row.get('sha256'))
+        total += path.stat().st_size
+        if path.stat().st_size > 1024 ** 2 or total > 4 * 1024 ** 2 or SECRET.search(path.read_bytes()):
+            raise ValueError('Unreviewed or oversized runtime review content')
+        seen_ids.add(row['id'])
+        paths[name], records[name] = path, row
+    if {entry.name for entry in root.iterdir()} != set(paths) or SECRET.search(manifest_path.read_bytes()):
+        raise ValueError('Unexpected file or credential-like text in runtime review')
+    atomic = manifest.get('libatomic', {})
+    if (not HASH.fullmatch(atomic.get('archiveSha256', ''))
+            or not COMMIT.fullmatch(atomic.get('sourceRevision', ''))
+            or not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', atomic.get('compilerVersion', ''))
+            or not compiler_version.endswith(' ' + atomic['compilerVersion'])):
+        raise ValueError('Runtime source or compiler identity is missing')
+    for key, role in (('linkageEvidenceFile', 'linkage-evidence'), ('licenseFile', 'license'),
+                      ('exceptionFile', 'license'), ('sourceHeaderFile', 'source-header')):
+        if records.get(atomic.get(key), {}).get('role') != role:
+            raise ValueError('Missing required runtime source, license or link evidence: ' + key)
+    audit = read_json(paths[atomic['linkageEvidenceFile']])
+    audited_build, audited_toolchain = audit.get('build', {}), audit.get('toolchain', {})
+    if (audit.get('schemaVersion') != 1 or audit.get('kind') != 'post-build-toolchain-runtime-provenance'
+            or audited_build.get('repository') != 'pascalghanimi/duskcut-ffmpeg'
+            or audited_build.get('recipeCommit') != revision
+            or audited_build.get('lockSha256') != result['lockSha256']
+            or audited_build.get('binaryHashes') != result['binaryHashes']
+            or audited_build.get('evidenceSha256') != digest_file(evidence_path)
+            or audited_toolchain.get('image') != manifest['compilerImage']
+            or audited_toolchain.get('imageId') != toolchain.get('Id')
+            or not re.fullmatch(r'sha256:[a-f0-9]{64}', str(toolchain.get('Id')))
+            or audited_toolchain.get('compilerVersion') != compiler_version):
+        raise ValueError('Post-build runtime audit does not match original compiler/build evidence')
+    archives = [row for row in audit.get('archives', []) if row.get('name') == 'libatomic.a']
+    if (len(archives) != 1 or archives[0].get('sha256') != atomic['archiveSha256']
+            or type(archives[0].get('bytes')) is not int or not 8 <= archives[0]['bytes'] <= 100 * 1024 ** 2
+            or archives[0].get('presentInBuildLinkTrace') is not True
+            or not re.fullmatch(r'/opt/ct-ng/[A-Za-z0-9_./+-]+/libatomic\.a', archives[0].get('path', ''))
+            or posixpath.normpath(archives[0]['path']) != archives[0]['path']):
+        raise ValueError('libatomic archive hash/path is not supported by the actual link trace')
+    archive = archives[0]
+    traces = archive.get('linkTraceFiles')
+    if not isinstance(traces, list) or not 1 <= len(traces) <= 100:
+        raise ValueError('Missing resolved libatomic link trace records')
+    seen_traces = set()
+    for trace in traces:
+        recorded = trace.get('recordedPath', '')
+        if (recorded not in linked_paths or recorded in seen_traces
+                or posixpath.basename(recorded) != 'libatomic.a'
+                or trace.get('resolvedPath') != archive['path']
+                or trace.get('bytes') != archive['bytes'] or trace.get('sha256') != archive['sha256']):
+            raise ValueError('Resolved libatomic link trace differs from the original build or compiler archive')
+        seen_traces.add(recorded)
+    return {'manifest': manifest, 'paths': paths, 'manifestSha256': digest_file(manifest_path)}
+
+
 def add_tar_bytes(archive, name, data):
     info = tarfile.TarInfo(safe_name(name))
     info.size = len(data)
@@ -376,7 +482,7 @@ def add_tar_file(archive, name, path):
         archive.addfile(info, source)
 
 
-def package(artifact, inputs, repository, output, version):
+def package(artifact, inputs, repository, output, version, runtime_review=None):
     artifact, inputs, repository, output = map(pathlib.Path, (artifact, inputs, repository, output))
     if output.exists():
         raise ValueError('Output directory must be new')
@@ -384,6 +490,7 @@ def package(artifact, inputs, repository, output, version):
     release_path, parts = verify_input_parts(inputs, manifest_path)
     if json.loads(snapshot.get('release-assets.json', b'null')) != read_json(release_path):
         raise ValueError('Source assets are not those pinned by the actual build commit')
+    runtime_evidence = verify_runtime_review(runtime_review, result, revision, evidence_path)
     # Conservative preflight estimate stops before writing an oversized source asset.
     estimated = sum(p.stat().st_size for p in parts) + evidence_path.stat().st_size + sum(map(len, snapshot.values())) + 8 * 1024 ** 2
     if estimated > MAX_ASSET_BYTES:
@@ -400,6 +507,12 @@ def package(artifact, inputs, repository, output, version):
                'recipeSnapshot': [{'file': name, 'size': len(data), 'sha256': digest_bytes(data)} for name, data in sorted(snapshot.items())]}
     if supplemental_path:
         binding['supplementalSourceManifestSha256'] = digest_file(supplemental_path)
+    if runtime_evidence:
+        binding['runtimeReview'] = {
+            'manifestSha256': runtime_evidence['manifestSha256'],
+            'scope': 'Post-build compiler-runtime source/license evidence; original build lock and inputs unchanged',
+            'files': runtime_evidence['manifest']['files'],
+        }
     rebuild = f'''# Corresponding source for DuskCut FFmpeg {build_id}
 
 This package binds FFmpeg source inputs, the executed build and the exact public
@@ -448,6 +561,9 @@ The assembler does not perform legal, runtime-license, GPU or functional approva
             add_tar_file(archive, 'evidence/' + name, regular(artifact, name))
         for name, data in sorted(snapshot.items()):
             add_tar_bytes(archive, 'recipe/' + name, data)
+        if runtime_evidence:
+            for name, path in sorted(runtime_evidence['paths'].items()):
+                add_tar_file(archive, 'runtime-review/' + name, path)
     if source_path.stat().st_size > MAX_ASSET_BYTES:
         raise ValueError('Corresponding source exceeds 2 GiB; asset must not be uploaded')
     url = f'{REPOSITORY}/releases/download/{build_id}/'
@@ -510,6 +626,20 @@ Gyan releases or unrelated FFmpeg binaries.
         runtime[name] = regular(inputs, 'sources/distribution/' + name)
     runtime['README.md'] = runtime_readme
     runtime['SOURCES.md'] = runtime_sources
+    if runtime_evidence:
+        note = b'''
+
+Post-build compiler-runtime notice: libatomic (GCC) is linked into this build.
+The original license, GCC Runtime Library Exception and source-header evidence
+are retained under sources/runtime-review/, bound by runtime-review.json to the
+original build, compiler image and binary hashes. The complete corresponding
+source archive contains the same post-build review in runtime-review/.
+This adds documentation; it does not alter the original source lock or binaries.
+'''
+        runtime['THIRD-PARTY-NOTICES.txt'] = runtime['THIRD-PARTY-NOTICES.txt'].read_bytes() + note
+        runtime['SOURCES.md'] += note
+        for name, path in runtime_evidence['paths'].items():
+            runtime['sources/runtime-review/' + name] = path
     runtime['sources/source-manifest.json'] = manifest_path
     if supplemental_path:
         runtime['sources/supplemental-manifest.json'] = supplemental_path
@@ -557,6 +687,7 @@ if __name__ == '__main__':
     parser.add_argument('--repo-dir', required=True)
     parser.add_argument('--output', required=True)
     parser.add_argument('--version', required=True, help='Exact ffmpeg/ffprobe -version token observed on Windows')
+    parser.add_argument('--runtime-review', help='Bound post-build runtime source/license evidence directory; required when libatomic is linked')
     args = parser.parse_args()
-    assembled = package(args.artifact_dir, args.source_staging, args.repo_dir, args.output, args.version)
+    assembled = package(args.artifact_dir, args.source_staging, args.repo_dir, args.output, args.version, args.runtime_review)
     print(json.dumps({'status': assembled['approvalStatus'], 'runtime': assembled['archive'], 'source': assembled['source']}))

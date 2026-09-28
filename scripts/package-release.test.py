@@ -100,8 +100,8 @@ class Fixture:
                 module.add_tar_bytes(archive, name, data)
         self.write(self.artifact, 'SHA256SUMS.txt', (module.digest_file(path) + '  ' + path.name + '\n').encode())
 
-    def package(self):
-        return module.package(self.artifact, self.inputs, self.repo, self.root / 'result', '9.0.2-test.1')
+    def package(self, runtime_review=None):
+        return module.package(self.artifact, self.inputs, self.repo, self.root / 'result', '9.0.2-test.1', runtime_review)
 
     def update_lock(self, lock):
         data = module.json_bytes(lock)
@@ -152,6 +152,47 @@ class Fixture:
         lock['blobs'].extend(rows)
         self.update_lock(lock)
         return supplement
+
+    def add_runtime_review(self, link_path=None, archive_path=None):
+        root = self.root / 'runtime-review'
+        root.mkdir()
+        image = 'ghcr.io/example/compiler@sha256:' + '1' * 64
+        image_id = 'sha256:' + '2' * 64
+        compiler_version = 'example-mingw32-gcc (fixture compiler) 16.2.0'
+        link_path = link_path or '/opt/ct-ng/lib/gcc/x86_64-w64-mingw32/16.2.0/libatomic.a'
+        archive_path = archive_path or module.posixpath.normpath(link_path)
+        self.evidence_files['work/ffmpeg-build.log'] = (link_path + '\n').encode()
+        self.evidence_files['work/toolchain-image.json'] = module.json_bytes({'reference': image, 'Id': image_id})
+        self.evidence_files['work/configuration/compiler-version.txt'] = (compiler_version + '\n').encode()
+        lock = json.loads(self.evidence_files['inputs/build-lock.json'])
+        lock['toolchain'] = {'image': image}
+        self.update_lock(lock)
+        audit = {'schemaVersion': 1, 'kind': 'post-build-toolchain-runtime-provenance',
+            'build': {'repository': 'pascalghanimi/duskcut-ffmpeg', 'recipeCommit': self.revision,
+                'lockSha256': self.result['lockSha256'], 'binaryHashes': self.result['binaryHashes'],
+                'evidenceSha256': module.digest_file(self.artifact / 'ffmpeg-build-evidence.tar.xz')},
+            'toolchain': {'image': image, 'imageId': image_id, 'compilerVersion': compiler_version},
+            'archives': [{'name': 'libatomic.a', 'sha256': '3' * 64, 'bytes': 12345, 'path': archive_path,
+                          'reportedPath': archive_path,
+                          'linkTraceFiles': [{'recordedPath': link_path, 'resolvedPath': archive_path,
+                                              'bytes': 12345, 'sha256': '3' * 64}],
+                          'presentInBuildLinkTrace': True}]}
+        files = [('GCC-COPYING3.txt', 'license', b'Fixture GPL3 license'),
+                 ('GCC-RUNTIME-EXCEPTION-3.1.txt', 'license', b'Fixture runtime exception'),
+                 ('GCC-libatomic_i.h.txt', 'source-header', b'Fixture source header'),
+                 ('libatomic-toolchain-audit.json', 'linkage-evidence', module.json_bytes(audit)),
+                 ('README.md', 'review', b'Post-build license review fixture only')]
+        rows = []
+        for name, role, data in files:
+            self.write(root, name, data)
+            rows.append({'id': name, 'file': name, 'role': role, 'bytes': len(data), 'sha256': module.digest_bytes(data)})
+        manifest = {'schemaVersion': 1, 'buildId': self.result['buildId'], 'buildLockSha256': self.result['lockSha256'],
+            'binaryHashes': self.result['binaryHashes'], 'compilerImage': image, 'files': rows,
+            'libatomic': {'archiveSha256': '3' * 64, 'sourceRevision': '4' * 40, 'compilerVersion': '16.2.0',
+                'linkageEvidenceFile': 'libatomic-toolchain-audit.json', 'licenseFile': 'GCC-COPYING3.txt',
+                'exceptionFile': 'GCC-RUNTIME-EXCEPTION-3.1.txt', 'sourceHeaderFile': 'GCC-libatomic_i.h.txt'}}
+        self.write(root, 'runtime-review.json', module.json_bytes(manifest))
+        return root, manifest, audit
 
 
 class ReleaseTests(unittest.TestCase):
@@ -369,6 +410,112 @@ class ReleaseTests(unittest.TestCase):
             with tarfile.open(fileobj=data, mode='r') as archive:
                 with self.assertRaises(ValueError):
                     module.archive_files(archive)
+
+    def test_linked_libatomic_requires_separate_bound_runtime_review(self):
+        fixture = self.fixture
+        fixture.evidence_files['work/ffmpeg-build.log'] = b'/opt/ct-ng/lib/libatomic.a\n'
+        fixture.save_evidence()
+        with self.assertRaisesRegex(ValueError, 'requires bound post-build'):
+            fixture.package()
+        self.assertFalse((fixture.root / 'result').exists())
+
+    def test_post_build_runtime_review_is_separate_and_preserved_in_source_and_runtime(self):
+        fixture = self.fixture
+        root, manifest, _ = fixture.add_runtime_review()
+        original_lock = fixture.evidence_files['inputs/build-lock.json']
+        candidate = fixture.package(root)
+        names = {row['path'] for row in candidate['files']}
+        self.assertIn('sources/runtime-review/GCC-RUNTIME-EXCEPTION-3.1.txt', names)
+        with zipfile.ZipFile(fixture.root / 'result/duskcut-ffmpeg-test.1-win64.zip') as archive:
+            self.assertIn(b'libatomic', archive.read('THIRD-PARTY-NOTICES.txt'))
+            self.assertEqual(archive.read('sources/runtime-review/runtime-review.json'), module.json_bytes(manifest))
+        with tarfile.open(fixture.root / 'result/duskcut-ffmpeg-test.1-corresponding-source.tar') as archive:
+            self.assertEqual(archive.extractfile('runtime-review/runtime-review.json').read(), module.json_bytes(manifest))
+        binding = module.read_json(fixture.root / 'result/SOURCE-BINDING.json')
+        self.assertEqual(binding['runtimeReview']['manifestSha256'], module.digest_bytes(module.json_bytes(manifest)))
+        self.assertEqual(fixture.evidence_files['inputs/build-lock.json'], original_lock)
+
+    def test_actual_gcc_dotdot_link_trace_matches_canonical_audited_archive(self):
+        fixture = self.fixture
+        actual_trace_path = '/opt/ct-ng/lib/gcc/x86_64-w64-mingw32/16.2.0/../../../../x86_64-w64-mingw32/lib/../lib/libatomic.a'
+        root, _, audit = fixture.add_runtime_review(actual_trace_path)
+        self.assertEqual(audit['archives'][0]['path'], '/opt/ct-ng/x86_64-w64-mingw32/lib/libatomic.a')
+        self.assertEqual(fixture.package(root)['approvalStatus'], 'candidate-awaiting-review')
+
+    def test_actual_gcc_dotdot_trace_can_resolve_through_container_symlink(self):
+        fixture = self.fixture
+        actual_trace_path = '/opt/ct-ng/lib/gcc/x86_64-w64-mingw32/16.2.0/../../../../x86_64-w64-mingw32/lib/../lib/libatomic.a'
+        resolved = '/opt/ct-ng/x86_64-w64-mingw32/sysroot/lib/libatomic.a'
+        root, _, audit = fixture.add_runtime_review(actual_trace_path, resolved)
+        self.assertNotEqual(module.posixpath.normpath(actual_trace_path), resolved)
+        self.assertEqual(audit['archives'][0]['linkTraceFiles'][0]['recordedPath'], actual_trace_path)
+        self.assertEqual(fixture.package(root)['approvalStatus'], 'candidate-awaiting-review')
+
+    def test_post_build_runtime_review_wrong_bindings_extra_files_or_changed_content_rejected(self):
+        fixture = self.fixture
+        root, manifest, _ = fixture.add_runtime_review()
+        original = module.json_bytes(manifest)
+        for key, value in [('buildId', 'wrong'), ('buildLockSha256', '0' * 64), ('binaryHashes', {}),
+                           ('compilerImage', 'ghcr.io/example/other@sha256:' + '1' * 64)]:
+            manifest = json.loads(original)
+            manifest[key] = value
+            fixture.write(root, 'runtime-review.json', module.json_bytes(manifest))
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, 'not bound'):
+                fixture.package(root)
+        fixture.write(root, 'runtime-review.json', original)
+        fixture.write(root, 'unexpected.txt', b'not approved')
+        with self.assertRaisesRegex(ValueError, 'Unexpected file'):
+            fixture.package(root)
+        (root / 'unexpected.txt').unlink()
+        fixture.write(root, 'GCC-COPYING3.txt', b'changed')
+        with self.assertRaisesRegex(ValueError, 'size or SHA-256'):
+            fixture.package(root)
+        self.assertFalse((fixture.root / 'result').exists())
+
+    def test_post_build_link_audit_must_match_original_archive_image_trace_and_executables(self):
+        fixture = self.fixture
+        root, manifest, audit = fixture.add_runtime_review()
+        original = module.json_bytes(audit)
+        changes = [('build', 'evidenceSha256', '0' * 64), ('build', 'binaryHashes', {}),
+                   ('toolchain', 'imageId', 'sha256:' + '0' * 64),
+                   ('archive', 'sha256', '0' * 64), ('archive', 'presentInBuildLinkTrace', False),
+                   ('archive', 'path', '/opt/ct-ng/wrong/libatomic.a'), ('archive', 'linkTraceFiles', []),
+                   ('trace', 'recordedPath', '/opt/ct-ng/unrecorded/libatomic.a'),
+                   ('trace', 'resolvedPath', '/opt/ct-ng/other/libatomic.a'),
+                   ('trace', 'bytes', 12346), ('trace', 'sha256', '0' * 64)]
+        for group, key, value in changes:
+            audit = json.loads(original)
+            target = (audit['archives'][0]['linkTraceFiles'][0] if group == 'trace' else
+                      audit['archives'][0] if group == 'archive' else audit[group])
+            target[key] = value
+            data = module.json_bytes(audit)
+            fixture.write(root, 'libatomic-toolchain-audit.json', data)
+            row = next(row for row in manifest['files'] if row['role'] == 'linkage-evidence')
+            row.update(bytes=len(data), sha256=module.digest_bytes(data))
+            fixture.write(root, 'runtime-review.json', module.json_bytes(manifest))
+            with self.subTest(group=group, key=key), self.assertRaises(ValueError):
+                fixture.package(root)
+
+    def test_only_exact_audited_public_security_fixture_is_preserved_without_redaction(self):
+        fixture = self.fixture
+        name = 'build/capture_environment_test.py'
+        data = (pathlib.Path(__file__).resolve().parents[1] / name).read_bytes().replace(b'\r\n', b'\n')
+        self.assertEqual(module.digest_bytes(data), module.AUDITED_TEST_FIXTURES[name])
+        self.assertIsNotNone(module.SECRET.search(data))
+        fixture.write(fixture.repo, name, data)
+        fixture.git('add', name)
+        fixture.git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--quiet', '-m', 'audited fixture')
+        revision = fixture.git('rev-parse', 'HEAD').decode().strip()
+        self.assertEqual(module.repository_snapshot(fixture.repo, revision)[name], data)
+        for path, content in [(name, data + b'\n# changed\n'), ('build/other_test.py', data)]:
+            fixture.write(fixture.repo, path, content)
+            fixture.git('add', name, path)
+            fixture.git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--quiet', '-m', 'unapproved fixture variation')
+            revision = fixture.git('rev-parse', 'HEAD').decode().strip()
+            with self.subTest(path=path), self.assertRaisesRegex(ValueError, 'Unreviewed'):
+                module.repository_snapshot(fixture.repo, revision)
+            # Restore the exact approved file before checking the different-path case.
+            fixture.write(fixture.repo, name, data)
 
 
 if __name__ == '__main__':

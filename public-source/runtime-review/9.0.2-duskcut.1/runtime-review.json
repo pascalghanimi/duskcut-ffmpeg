@@ -1,0 +1,72 @@
+{
+  "schemaVersion": 1,
+  "status": "post-build-license-and-runtime-provenance-reviewed",
+  "buildId": "9.0.2-duskcut.1",
+  "buildLockSha256": "9dc31b6bf68dc0f83f544efe9c601266c53ed1556521a10f8c331adf9598f848",
+  "binaryHashes": {
+    "ffmpeg.exe": "77ea4c94db1676801cc372302c4a18422e70213e9c915207a798bc05390ceab5",
+    "ffprobe.exe": "923dc6aa82ba8de3a1b25ccfb2c5809d5e5954e6e040abb40c2817213c1272da"
+  },
+  "compilerImage": "ghcr.io/btbn/ffmpeg-builds/base-win64@sha256:ca6aaa981df5fe20d341f2f7e681875266adddabe117add1367765471d7d30ea",
+  "files": [
+    {
+      "file": "GCC-BASE-VER.txt",
+      "bytes": 7,
+      "sha256": "e9f8839c742db21d285464b01dfb2e572f802c366729873cdc4a296c8c3a01ea",
+      "role": "review",
+      "id": "gcc-source-version"
+    },
+    {
+      "file": "GCC-COPYING3.txt",
+      "bytes": 35147,
+      "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903",
+      "role": "license",
+      "id": "gcc-gpl3-license"
+    },
+    {
+      "file": "GCC-RUNTIME-EXCEPTION-3.1.txt",
+      "bytes": 3324,
+      "sha256": "9d6b43ce4d8de0c878bf16b54d8e7a10d9bd42b75178153e3af6a815bdc90f74",
+      "role": "license",
+      "id": "gcc-runtime-exception"
+    },
+    {
+      "file": "GCC-libatomic_i.h.txt",
+      "bytes": 9753,
+      "sha256": "c55abb69ae36948e3d0b108f7179ac9e4bb7ef8aa01b3d7e7993442e2ff67702",
+      "role": "source-header",
+      "id": "gcc-libatomic-license-header"
+    },
+    {
+      "file": "README.md",
+      "bytes": 2804,
+      "sha256": "ef06a4cc5979dbd9baf4aae862ab2e75fdf091fbab9049dc63bd8c907652606f",
+      "role": "review",
+      "id": "runtime-review-explanation"
+    },
+    {
+      "file": "compiled-runtime-inspection.json",
+      "bytes": 10061,
+      "sha256": "91028597e4c6720b3ea06b867a9128e685e0dfbe4ce93118b77e8b3946d0b184",
+      "role": "review",
+      "id": "compiled-runtime-static-inspection"
+    },
+    {
+      "file": "libatomic-toolchain-audit.json",
+      "bytes": 5282,
+      "sha256": "14aa959e360c9010c6209d1b7c96eb51528d1b8b69a4a957bced0dd4d7250fed",
+      "role": "linkage-evidence",
+      "id": "libatomic-same-image-linkage"
+    }
+  ],
+  "libatomic": {
+    "archiveSha256": "fa0641db643e83ff29df31e6e0c13cdd76108ab3cd1e1977dc9617f4383d4c6c",
+    "linkageEvidenceFile": "libatomic-toolchain-audit.json",
+    "licenseFile": "GCC-COPYING3.txt",
+    "exceptionFile": "GCC-RUNTIME-EXCEPTION-3.1.txt",
+    "sourceHeaderFile": "GCC-libatomic_i.h.txt",
+    "sourceRevision": "78d4ac73dd391005b895a6148cd9831e28e1208b",
+    "compilerVersion": "16.2.0",
+    "reviewFile": "README.md"
+  }
+}
