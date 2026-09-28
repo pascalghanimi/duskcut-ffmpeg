@@ -301,7 +301,7 @@ def verify_build(artifact, inputs, repository, version):
         if json.loads(member_bytes(evidence, members, 'work/control/lock.json')) != lock:
             raise ValueError('Executed control lock differs from input lock')
         profile = member_bytes(evidence, members, 'work/control/profile.json')
-        windows_profile = json.loads(profile).get('id') == 'duskcut-win64-gpl-windows-codecs-v2'
+        windows_profile = json.loads(profile).get('id') in ('duskcut-win64-gpl-windows-codecs-v2', 'duskcut-win64-gpl-windows-codecs-v3')
         for control in CONTROLS if windows_profile else LEGACY_CONTROLS:
             if member_bytes(evidence, members, 'work/control/' + control) != snapshot.get('build/' + control):
                 raise ValueError('Executed build control differs from recorded commit: ' + control)

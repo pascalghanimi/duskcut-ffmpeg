@@ -1,8 +1,8 @@
 # Controlled DuskCut FFmpeg build
 
-The `duskcut-win64-gpl-windows-codecs-v2` profile builds Windows x64 static FFmpeg
-and ffprobe from fixed source inputs. H.264, HEVC and AAC encode/decode use only
-Windows Media Foundation wrappers. It excludes native implementations, x264/x265,
+The `duskcut-win64-gpl-windows-codecs-v3` profile builds Windows x64 static FFmpeg
+and ffprobe from fixed source inputs. H.264 and AAC encode/decode and HEVC decode
+use only Windows Media Foundation wrappers. HEVC encoding is disabled. It excludes native implementations, x264/x265,
 direct GPU codec encoders, ProRes, WMV/VC-1, DVD access/CSS decryption and the
 unused Rust/SVG/JXL/Vulkan dependency stacks. `profile.json` is authoritative.
 AV1/AVIF, VP8/VP9 (including alpha), MPEG-2, font rendering, Rubber Band pitch and
@@ -42,7 +42,7 @@ and 16 GB RAM. The compiler image contains Python and build tools.
 2. Create and validate the build lock:
 
    ```sh
-   node build/create-lock.mjs input-data 9.0.2-duskcut.2
+   node build/create-lock.mjs input-data 9.0.2-duskcut.3
    node build/validate-lock.mjs input-data/build-lock.json
    ```
 
@@ -59,7 +59,7 @@ and 16 GB RAM. The compiler image contains Python and build tools.
 The lock binds all selected sources and license evidence to their content hashes.
 It also binds the profile. The executed generated Dockerfile must select exactly
 the same cache members: missing or extra compile inputs stop the build.
-The binary build ID is separate from `sourceReleaseTag`: .2 reuses the exact
+The binary build ID is separate from `sourceReleaseTag`: .3 reuses the exact
 hash-pinned `sources-9.0.2-duskcut.1` inputs and adds versioned local MF wrapper
 source from this repository. This does not claim the old inputs were republished.
 Before configure, `apply_windows_codecs.py` applies the reviewed adapter and

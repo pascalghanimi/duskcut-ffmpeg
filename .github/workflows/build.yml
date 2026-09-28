@@ -39,7 +39,7 @@ jobs:
         run: |
           node scripts/fetch-inputs.mjs release-assets.json downloads
           python3 scripts/extract-inputs.py release-assets.json downloads input-data
-          node build/create-lock.mjs input-data 9.0.2-duskcut.2
+          node build/create-lock.mjs input-data 9.0.2-duskcut.3
 
       - name: Pull exact compiler environment
         run: |
@@ -60,7 +60,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
-          name: duskcut-ffmpeg-9.0.2-duskcut.2-${{ github.run_id }}
+          name: duskcut-ffmpeg-9.0.2-duskcut.3-${{ github.run_id }}
           path: |
             out/BUILD-RESULT.json
             out/BUILD-RECIPE-COMMIT.txt

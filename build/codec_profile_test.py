@@ -38,7 +38,7 @@ class PolicyTests(unittest.TestCase):
 
     def test_bundled_decoders_gpu_wrappers_and_removed_formats_fail_closed(self):
         for name in ("H264_DECODER", "HEVC_DECODER", "AAC_FIXED_DECODER", "AAC_LATM_DECODER",
-                     "LIBX264_ENCODER", "LIBX264RGB_ENCODER", "LIBX265_ENCODER", "LIBFDK_AAC_ENCODER",
+                     "LIBX264_ENCODER", "LIBX264RGB_ENCODER", "LIBX265_ENCODER", "LIBFDK_AAC_ENCODER", "HEVC_MF_ENCODER",
                      "H264_D3D11VA_HWACCEL", "HEVC_CUVID_DECODER", "H264_QSV_ENCODER",
                      "AV1_NVENC_ENCODER", "AV1_AMF_ENCODER", "VP9_QSV_ENCODER",
                      "PRORES_KS_ENCODER", "PRORES_RAW_DECODER", "PRORES_VIDEOTOOLBOX_ENCODER",

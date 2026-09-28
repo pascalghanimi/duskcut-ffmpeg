@@ -5,11 +5,11 @@ import pathlib
 import re
 import sys
 
-PROFILE_ID = "duskcut-win64-gpl-windows-codecs-v2"
+PROFILE_ID = "duskcut-win64-gpl-windows-codecs-v3"
 MF_CODECS = frozenset(("H264_MF", "HEVC_MF", "AAC_MF", "AAC_LATM_MF"))
 REQUIRED = (
     "GPL", "MEDIAFOUNDATION", "H264_MF_DECODER", "HEVC_MF_DECODER", "AAC_MF_DECODER", "AAC_LATM_MF_DECODER",
-    "H264_MF_ENCODER", "HEVC_MF_ENCODER", "AAC_MF_ENCODER",
+    "H264_MF_ENCODER", "AAC_MF_ENCODER",
     "LIBRUBBERBAND", "LIBVIDSTAB", "RUBBERBAND_FILTER", "VIDSTABDETECT_FILTER", "VIDSTABTRANSFORM_FILTER",
     "AV1_DECODER", "LIBDAV1D_DECODER", "LIBSVTAV1_ENCODER", "AVIF_MUXER", "MOV_DEMUXER",
     "VP8_DECODER", "VP9_DECODER", "LIBVPX_VP9_DECODER", "LIBVPX_VP9_ENCODER", "MPEG2VIDEO_DECODER",
@@ -17,6 +17,8 @@ REQUIRED = (
 
 
 def forbidden(name):
+    if name == "HEVC_MF_ENCODER":
+        return True
     if name in ("LIBX264", "LIBX265", "LIBOPENH264", "LIBFDK_AAC", "LIBDVDREAD", "LIBDVDNAV", "LIBCDIO"):
         return True
     match = re.fullmatch(r"(.+)_(DECODER|ENCODER|HWACCEL)", name)
