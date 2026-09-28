@@ -36,6 +36,8 @@ typedef struct MFDecodeContext {
     DWORD input_id, output_id;
     MFT_OUTPUT_STREAM_INFO output_info;
     AVPacket *packet;
+    AVPacket *properties[512];
+    int property_count;
     int audio, draining, eof, configured, discontinuity;
     int width, height, stride;
     int crop_left, crop_top, crop_right, crop_bottom;
@@ -47,10 +49,53 @@ typedef struct MFDecodeContext {
 
 static int mf_error(AVCodecContext *avctx, const char *operation, HRESULT hr)
 {
+    MFDecodeContext *c = avctx->priv_data;
+    /* A permanently rejected profile must not spin ProcessOutput forever. */
+    c->eof = 1;
     av_log(avctx, AV_LOG_ERROR, "Windows %s failed: %s. "
            "The installed Windows codec may not support this media profile.\n",
            operation, ff_hr_str(hr));
     return AVERROR_EXTERNAL;
+}
+
+static void mf_clear_properties(MFDecodeContext *c)
+{
+    for (int i = 0; i < c->property_count; i++) av_packet_free(&c->properties[i]);
+    c->property_count = 0;
+}
+
+static int mf_save_properties(MFDecodeContext *c, const AVPacket *packet)
+{
+    AVPacket *props = av_packet_alloc();
+    int ret;
+    if (!props) return AVERROR(ENOMEM);
+    ret = av_packet_copy_props(props, packet);
+    if (ret < 0) { av_packet_free(&props); return ret; }
+    /* Bound retained metadata even for a malformed stream producing no frames. */
+    if (c->property_count == FF_ARRAY_ELEMS(c->properties)) {
+        av_packet_free(&c->properties[0]);
+        memmove(c->properties, c->properties + 1, (--c->property_count) * sizeof(*c->properties));
+    }
+    c->properties[c->property_count++] = props;
+    return 0;
+}
+
+static int mf_apply_properties(AVCodecContext *avctx, AVFrame *frame, int64_t pts)
+{
+    MFDecodeContext *c = avctx->priv_data;
+    for (int i = 0; i < c->property_count; i++) {
+        AVPacket *props = c->properties[i];
+        if (props->pts != pts) continue;
+        /* Use the matching packet, not the most recently submitted packet:
+         * B-frame reorder and AAC priming otherwise attach trimming to the
+         * wrong output. Windows can itself suppress the priming packet. */
+        int ret = ff_decode_frame_props_from_pkt(avctx, frame, props);
+        av_packet_free(&c->properties[i]);
+        memmove(c->properties + i, c->properties + i + 1,
+                (--c->property_count - i) * sizeof(*c->properties));
+        return ret;
+    }
+    return 0;
 }
 
 static AVRational mf_packet_time_base(const AVCodecContext *avctx)
@@ -287,6 +332,8 @@ static int mf_copy_sample(AVCodecContext *avctx, IMFSample *sample, AVFrame *fra
     }
     frame->pts = SUCCEEDED(IMFSample_GetSampleTime(sample, &time))
         ? av_rescale_q(time, MF_TIME_BASE, mf_packet_time_base(avctx)) : AV_NOPTS_VALUE;
+    ret = mf_apply_properties(avctx, frame, frame->pts);
+    if (ret < 0) goto done;
     if (SUCCEEDED(IMFSample_GetSampleDuration(sample, &time)))
         frame->duration = av_rescale_q(time, MF_TIME_BASE, mf_packet_time_base(avctx));
     else if (c->audio)
@@ -388,6 +435,8 @@ static int mf_receive_frame(AVCodecContext *avctx, AVFrame *frame)
             /* Keep the packet on backpressure; never drop the first syllable/frame. */
             if (hr == MF_E_NOTACCEPTING) return AVERROR(EAGAIN);
             if (FAILED(hr)) return mf_error(avctx, "compressed sample input", hr);
+            ret = mf_save_properties(c, c->packet);
+            if (ret < 0) return ret;
             c->discontinuity = 0;
             av_packet_unref(c->packet);
         }
@@ -398,6 +447,7 @@ static void mf_flush(AVCodecContext *avctx)
 {
     MFDecodeContext *c = avctx->priv_data;
     av_packet_unref(c->packet);
+    mf_clear_properties(c);
     c->draining = c->eof = 0;
     c->discontinuity = 1;
     if (c->mft && c->configured) {
@@ -414,6 +464,7 @@ static av_cold int mf_close_decoder(AVCodecContext *avctx)
         ff_free_mf(&c->functions, &c->mft);
     }
     av_packet_free(&c->packet);
+    mf_clear_properties(c);
 #if !HAVE_UWP
     if (c->library) dlclose(c->library);
 #endif
@@ -479,7 +530,7 @@ const FFCodec ff_ ## NAME ## _mf_decoder = { \
     .close = mf_close_decoder, \
     .flush = mf_flush, \
     FF_CODEC_RECEIVE_FRAME_CB(mf_receive_frame), \
-    .p.capabilities = AV_CODEC_CAP_DELAY, \
+    .p.capabilities = AV_CODEC_CAP_DELAY | AV_CODEC_CAP_CHANNEL_CONF, \
     .caps_internal = FF_CODEC_CAP_INIT_CLEANUP | FF_CODEC_CAP_SETS_FRAME_PROPS, \
     .bsfs = BSFS, \
     .p.wrapper_name = "mediafoundation", \
