@@ -10,13 +10,13 @@ marker = 'aac_mf_encoder_deps="mediafoundation"'
 if contents.count(marker) != 1:
     raise SystemExit("Pinned FFmpeg configure layout changed")
 contents = contents.replace(marker, '''aac_mf_decoder_deps="mediafoundation"
-aac_mf_decoder_select="mpeg4audio"
+aac_mf_decoder_select="mpeg4audio adts_header"
 aac_latm_mf_decoder_deps="mediafoundation"
-aac_latm_mf_decoder_select="mpeg4audio"
+aac_latm_mf_decoder_select="mpeg4audio adts_header"
 h264_mf_decoder_deps="mediafoundation"
-h264_mf_decoder_select="h264_mp4toannexb_bsf mpeg4audio"
+h264_mf_decoder_select="h264_mp4toannexb_bsf mpeg4audio adts_header"
 hevc_mf_decoder_deps="mediafoundation"
-hevc_mf_decoder_select="hevc_mp4toannexb_bsf mpeg4audio"
+hevc_mf_decoder_select="hevc_mp4toannexb_bsf mpeg4audio adts_header"
 ''' + marker)
 config.write_text(contents)
 makefile = root / "libavcodec/Makefile"

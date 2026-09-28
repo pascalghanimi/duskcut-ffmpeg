@@ -20,6 +20,7 @@
 #include "codec_internal.h"
 #include "decode.h"
 #include "internal.h"
+#include "adts_header.h"
 #include "mpeg4audio.h"
 #include "compat/w32dlfcn.h"
 #include "libavutil/channel_layout.h"
@@ -38,7 +39,7 @@ typedef struct MFDecodeContext {
     AVPacket *packet;
     AVPacket *properties[512];
     int property_count;
-    int audio, draining, eof, configured, discontinuity;
+    int audio, draining, eof, failed, configured, discontinuity;
     int width, height, stride;
     int crop_left, crop_top, crop_right, crop_bottom;
     enum AVPixelFormat pixel_format;
@@ -51,7 +52,7 @@ static int mf_error(AVCodecContext *avctx, const char *operation, HRESULT hr)
 {
     MFDecodeContext *c = avctx->priv_data;
     /* A permanently rejected profile must not spin ProcessOutput forever. */
-    c->eof = 1;
+    c->failed = 1;
     av_log(avctx, AV_LOG_ERROR, "Windows %s failed: %s. "
            "The installed Windows codec may not support this media profile.\n",
            operation, ff_hr_str(hr));
@@ -221,6 +222,16 @@ static int mf_set_input(AVCodecContext *avctx, const AVPacket *packet)
             (packet && packet->size >= 2 && packet->data[0] == 0xff &&
              (packet->data[1] & 0xf6) == 0xf0 ? 1 : 0);
         MPEG4AudioConfig config;
+        if (payload == 1 && packet->size >= AV_AAC_ADTS_HEADER_SIZE) {
+            AACADTSHeaderInfo header;
+            if (ff_adts_header_parse_buf(packet->data, &header) < 0) {
+                ret = AVERROR_INVALIDDATA;
+                goto done;
+            }
+            rate = header.sample_rate;
+            if (header.chan_config > 0 && header.chan_config < FF_ARRAY_ELEMS(ff_mpeg4audio_channels))
+                channels = ff_mpeg4audio_channels[header.chan_config];
+        }
         if (!payload && avctx->extradata_size > 0 &&
             avpriv_mpeg4audio_get_config2(&config, avctx->extradata,
                                         avctx->extradata_size, 1, avctx) >= 0) {
@@ -389,6 +400,16 @@ static int mf_receive_frame(AVCodecContext *avctx, AVFrame *frame)
     HRESULT hr;
 
     if (c->eof) return AVERROR_EOF;
+    if (c->failed) {
+        /* Drain compressed packets after reporting a fatal MFT error. Returning
+         * EOF while libavcodec still has a queued input violates send/receive
+         * progress guarantees and can hang avformat_find_stream_info. */
+        do {
+            av_packet_unref(c->packet);
+            ret = ff_decode_get_packet(avctx, c->packet);
+        } while (ret >= 0);
+        return ret;
+    }
     for (;;) {
         if (c->configured) {
             ret = mf_output(avctx, frame);
@@ -448,7 +469,7 @@ static void mf_flush(AVCodecContext *avctx)
     MFDecodeContext *c = avctx->priv_data;
     av_packet_unref(c->packet);
     mf_clear_properties(c);
-    c->draining = c->eof = 0;
+    c->draining = c->eof = c->failed = 0;
     c->discontinuity = 1;
     if (c->mft && c->configured) {
         IMFTransform_ProcessMessage(c->mft, MFT_MESSAGE_COMMAND_FLUSH, 0);

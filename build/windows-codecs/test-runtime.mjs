@@ -46,7 +46,7 @@ for (const f of fixtures) {
   }
   for (const seek of [0, 0.733]) {
     const options = [...(seek ? ['-ss', String(seek)] : []), '-i', path]
-    const out = f.video ? ['-an', '-pix_fmt', 'yuv420p', '-f', 'rawvideo', '-'] : ['-vn', '-c:a', 'pcm_f32le', '-f', 'wav', '-']
+    const out = f.video ? ['-an', '-pix_fmt', f.name.includes('10') ? 'yuv420p10le' : 'yuv420p', '-f', 'rawvideo', '-'] : ['-vn', '-c:a', 'pcm_f32le', '-f', 'wav', '-']
     const native = invoke(reference, [...options, ...out])
     const system = invoke(candidate, ['-c:' + (f.video ? 'v' : 'a'), f.codec || 'aac_mf', ...options, ...out])
     if (!f.video) { native.bytes = wavePayload(native.bytes); system.bytes = wavePayload(system.bytes) }
@@ -63,6 +63,16 @@ for (const f of fixtures) {
       }
       row.audioRmse = Math.sqrt(square / n)
       row.audioMaxError = peak
+    }
+    if (f.video && native.ok && system.ok && native.bytes.length === system.bytes.length) {
+      const step = f.name.includes('10') ? 2 : 1
+      let maxError = 0, count = 0
+      for (let i = 0; i < native.bytes.length; i += step) {
+        const diff = Math.abs((step === 2 ? native.bytes.readUInt16LE(i) : native.bytes[i]) -
+          (step === 2 ? system.bytes.readUInt16LE(i) : system.bytes[i]))
+        maxError = Math.max(maxError, diff); if (diff) count++
+      }
+      row.videoMaxError = maxError; row.differingSamples = count
     }
     results.push(row)
     console.log(JSON.stringify(row))
