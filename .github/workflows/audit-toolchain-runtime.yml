@@ -1,0 +1,45 @@
+name: Inspect completed-build compiler runtimes
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+
+      - name: Test read-only audit boundaries
+        run: node --test scripts/audit-toolchain-runtime.test.mjs
+
+      - name: Retrieve the exact successful build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api repos/pascalghanimi/duskcut-ffmpeg/actions/runs/36355675824 > run-metadata.json
+          gh run download 36355675824 --repo pascalghanimi/duskcut-ffmpeg --name duskcut-ffmpeg-9.0.2-duskcut.1-36355675824 --dir audited-build
+
+      - name: Provision the original immutable compiler image
+        run: docker pull ghcr.io/btbn/ffmpeg-builds/base-win64@sha256:ca6aaa981df5fe20d341f2f7e681875266adddabe117add1367765471d7d30ea
+
+      - name: Inspect compiler archives offline without modifying the build
+        run: node scripts/audit-toolchain-runtime.mjs audited-build run-metadata.json runtime-audit
+
+      - name: Retain only the provenance report, not toolchain binaries
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: runtime-audit-36355675824-${{ github.run_id }}
+          path: runtime-audit/
+          if-no-files-found: error
+          retention-days: 30
