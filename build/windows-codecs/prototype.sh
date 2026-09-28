@@ -5,7 +5,7 @@ mkdir -p /work/prototype-out
 ./configure --target-os=mingw32 --arch=x86_64 --enable-cross-compile \
   --cross-prefix=x86_64-w64-mingw32- --cc="$CC" --cxx="$CXX" --ar="$AR" --nm="$NM" --ranlib="$RANLIB" \
   --disable-autodetect --disable-doc --disable-debug --disable-ffplay --disable-network \
-  --disable-everything --enable-ffmpeg --enable-ffprobe --enable-mediafoundation \
+  --disable-everything --enable-ffmpeg --enable-ffprobe --enable-mediafoundation --enable-d3d11va \
   --enable-protocol=file,pipe --enable-demuxer=mov,matroska,aac,mpegts,h264,hevc,wav,rawvideo \
   --enable-muxer=mov,mp4,matroska,rawvideo,wav,null,framemd5,hash,md5,adts \
   --enable-decoder=aac_mf,aac_latm_mf,h264_mf,hevc_mf,pcm_s16le,pcm_f32le,rawvideo \
