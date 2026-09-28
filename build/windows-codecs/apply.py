@@ -35,6 +35,40 @@ contents = contents.replace(marker, "\n".join(
 registry.write_text(contents)
 (root / "libavcodec/mfdec.c").write_bytes((own / "mfdec.c").read_bytes())
 
+# Windows MFTs omit some bitstream colour values or approximate BT.709 as gamma
+# 2.2. The already-enabled header parsers know the exact VUI; expose only values
+# that were actually signalled. This is metadata parsing, not pixel decoding.
+for relative, vui, marker in (
+    ("libavcodec/h264_parser.c", "sps->vui",
+     "            avctx->profile = ff_h264_get_profile(sps);"),
+    ("libavcodec/hevc/parser.c", "sps->vui.common",
+     "    avctx->profile  = sps->ptl.general_ptl.profile_idc;"),
+):
+    path = root / relative
+    source = path.read_text()
+    if source.count(marker) != 1:
+        raise SystemExit("Pinned VUI header-parser layout changed: " + relative)
+    indent = marker[:len(marker) - len(marker.lstrip())]
+    lines = [
+        "/* Retain explicit VUI metadata for installed-system-codec wrappers. */",
+        "{",
+        f"    const H2645VUI *vui = &{vui};",
+        "    if (vui->aspect_ratio_info_present_flag && vui->sar.num > 0 && vui->sar.den > 0)",
+        "        avctx->sample_aspect_ratio = vui->sar;",
+        "    if (vui->video_signal_type_present_flag)",
+        "        avctx->color_range = vui->video_full_range_flag ? AVCOL_RANGE_JPEG : AVCOL_RANGE_MPEG;",
+        "    if (vui->colour_description_present_flag) {",
+        "        avctx->color_primaries = vui->colour_primaries;",
+        "        avctx->color_trc = vui->transfer_characteristics;",
+        "        avctx->colorspace = vui->matrix_coeffs;",
+        "    }",
+        "    if (vui->chroma_loc_info_present_flag)",
+        "        avctx->chroma_sample_location = vui->chroma_location;",
+        "}",
+    ]
+    source = source.replace(marker, "\n".join(indent + line for line in lines) + "\n" + marker)
+    path.write_text(source)
+
 # Both APIs accept a WCHAR count, not sizeof(bytes). Keep this upstream helper
 # bounds correction in the same reproducible source patch.
 utility = root / "libavcodec/mf_utils.c"

@@ -124,6 +124,28 @@ static enum AVColorSpace mf_color_matrix(UINT32 value)
     }
 }
 
+static void mf_apply_header_metadata(AVCodecContext *avctx)
+{
+    MFDecodeContext *c = avctx->priv_data;
+    const AVCodecContext *header = c->parser_context;
+    if (!header) return;
+    /* Exact, explicitly signalled VUI takes priority over MFT approximations.
+     * Microsoft HEVC MFTs can report BT.709 as gamma 2.2 and omit the matrix;
+     * some H.264 MFTs do not expose sRGB. No pixels are decoded by the parser. */
+    if (header->color_primaries != AVCOL_PRI_UNSPECIFIED)
+        avctx->color_primaries = header->color_primaries;
+    if (header->color_trc != AVCOL_TRC_UNSPECIFIED)
+        avctx->color_trc = header->color_trc;
+    if (header->colorspace != AVCOL_SPC_UNSPECIFIED)
+        avctx->colorspace = header->colorspace;
+    if (header->color_range != AVCOL_RANGE_UNSPECIFIED)
+        avctx->color_range = header->color_range;
+    if (header->chroma_sample_location != AVCHROMA_LOC_UNSPECIFIED)
+        avctx->chroma_sample_location = header->chroma_sample_location;
+    if (header->sample_aspect_ratio.num > 0 && header->sample_aspect_ratio.den > 0)
+        avctx->sample_aspect_ratio = header->sample_aspect_ratio;
+}
+
 static void mf_read_video_metadata(AVCodecContext *avctx, IMFMediaType *type)
 {
     MFDecodeContext *c = avctx->priv_data;
@@ -151,6 +173,7 @@ static void mf_read_video_metadata(AVCodecContext *avctx, IMFMediaType *type)
             &MF_MT_PIXEL_ASPECT_RATIO, &num, &den)) && num && den)
         av_reduce(&avctx->sample_aspect_ratio.num, &avctx->sample_aspect_ratio.den,
                   num, den, INT_MAX);
+    mf_apply_header_metadata(avctx);
 
     memset(&c->mastering, 0, sizeof(c->mastering));
     c->has_content_light = 0;
@@ -397,28 +420,24 @@ static int mf_latm_config(AVCodecContext *avctx, const AVPacket *packet, MPEG4Au
     return ff_mpeg4audio_get_config_gb(config, &gb, 0, avctx);
 }
 
-static int mf_set_input(AVCodecContext *avctx, const AVPacket *packet)
+static int mf_parse_video_header(AVCodecContext *avctx, const AVPacket *packet)
 {
     MFDecodeContext *c = avctx->priv_data;
-    IMFMediaType *type = NULL;
-    const GUID *subtype = avctx->codec_id == AV_CODEC_ID_AAC_LATM
-        ? &MFAudioFormat_AAC : ff_codec_to_mf_subtype(avctx->codec_id);
-    HRESULT hr;
-    int ret = 0;
-
     if (!c->audio && c->parser && packet) {
         uint8_t *parsed;
-        int parsed_size;
+        int parsed_size, ret;
         const AVPixFmtDescriptor *desc;
         /* The decoder input BSF already converted the packet to Annex B.
          * Use a separate header-only parser context without the original avcC/
          * hvcC extradata so the parser does not mistake it for length prefixes.
          * MOV demuxing alone does not populate profile/bit depth reliably. */
-        av_parser_parse2(c->parser, c->parser_context, &parsed, &parsed_size,
+        ret = av_parser_parse2(c->parser, c->parser_context, &parsed, &parsed_size,
                           packet->data, packet->size, packet->pts, packet->dts, packet->pos);
+        if (ret < 0) { c->failed = 1; return ret; }
         if (c->parser->format >= 0) c->source_format = c->parser->format;
         if (c->parser_context->profile >= 0) avctx->profile = c->parser_context->profile;
         if (c->parser_context->level >= 0) avctx->level = c->parser_context->level;
+        mf_apply_header_metadata(avctx);
         if (c->parser->width > 0 && c->parser->height > 0) {
             avctx->width = c->parser->width;
             avctx->height = c->parser->height;
@@ -431,6 +450,17 @@ static int mf_set_input(AVCodecContext *avctx, const AVPacket *packet)
             return AVERROR(ENOSYS);
         }
     }
+    return 0;
+}
+
+static int mf_set_input(AVCodecContext *avctx, const AVPacket *packet)
+{
+    MFDecodeContext *c = avctx->priv_data;
+    IMFMediaType *type = NULL;
+    const GUID *subtype = avctx->codec_id == AV_CODEC_ID_AAC_LATM
+        ? &MFAudioFormat_AAC : ff_codec_to_mf_subtype(avctx->codec_id);
+    HRESULT hr;
+    int ret = 0;
 
 #define SET_ATTR(call) do { hr = (call); if (FAILED(hr)) goto fail; } while (0)
     SET_ATTR(c->functions.MFCreateMediaType(&type));
@@ -564,6 +594,10 @@ static int mf_copy_sample(AVCodecContext *avctx, IMFSample *sample, AVFrame *fra
         if (frame->ch_layout.nb_channels != c->channels) { ret = AVERROR_INVALIDDATA; goto done; }
         avctx->sample_fmt = c->sample_format;
         avctx->sample_rate = c->sample_rate;
+        /* Raw AAC/LATM demuxers use the decoded frame size to derive packet
+         * durations. Leaving this unset makes raw ADTS timestamps unknown and
+         * an input-side seek can consume the entire file without producing audio. */
+        avctx->frame_size = frame->nb_samples;
         av_channel_layout_uninit(&avctx->ch_layout);
         ret = av_channel_layout_copy(&avctx->ch_layout, &frame->ch_layout);
         if (ret < 0) goto done;
@@ -688,6 +722,11 @@ static int mf_receive_frame(AVCodecContext *avctx, AVFrame *frame)
                 if (FAILED(hr)) return mf_error(avctx, "drain", hr);
                 continue;
             }
+            if (ret < 0) return ret;
+            /* Refresh VUI/profile for each new access unit. A later stream-change
+             * must choose P010 for new 10-bit content, never retain stale NV12.
+             * The retained packet is not parsed again after MFT backpressure. */
+            ret = mf_parse_video_header(avctx, c->packet);
             if (ret < 0) return ret;
         }
         if (!c->configured) {
