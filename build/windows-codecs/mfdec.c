@@ -427,6 +427,14 @@ static int mf_parse_video_header(AVCodecContext *avctx, const AVPacket *packet)
         uint8_t *parsed;
         int parsed_size, ret;
         const AVPixFmtDescriptor *desc;
+        const enum AVPixelFormat prior_format = c->source_format;
+        const int prior_profile = c->parser_context->profile;
+        const enum AVColorPrimaries prior_primaries = c->parser_context->color_primaries;
+        const enum AVColorTransferCharacteristic prior_transfer = c->parser_context->color_trc;
+        const enum AVColorSpace prior_matrix = c->parser_context->colorspace;
+        const enum AVColorRange prior_range = c->parser_context->color_range;
+        const enum AVChromaLocation prior_chroma = c->parser_context->chroma_sample_location;
+        const AVRational prior_sar = c->parser_context->sample_aspect_ratio;
         /* The decoder input BSF already converted the packet to Annex B.
          * Use a separate header-only parser context without the original avcC/
          * hvcC extradata so the parser does not mistake it for length prefixes.
@@ -434,6 +442,25 @@ static int mf_parse_video_header(AVCodecContext *avctx, const AVPacket *packet)
         ret = av_parser_parse2(c->parser, c->parser_context, &parsed, &parsed_size,
                           packet->data, packet->size, packet->pts, packet->dts, packet->pos);
         if (ret < 0) { c->failed = 1; return ret; }
+        /* Some installed transforms silently accept a later 10-bit sequence
+         * while continuing to emit their initial NV12 format, without sending
+         * MF_E_TRANSFORM_STREAM_CHANGE. Delayed frames also cannot safely use
+         * a later sequence's colour/SAR. Reject such rare concatenated streams
+         * before feeding changed samples instead of silently changing pixels. */
+        if (c->configured && (
+            (prior_format >= 0 && c->parser->format >= 0 && prior_format != c->parser->format) ||
+            (prior_profile >= 0 && c->parser_context->profile >= 0 && prior_profile != c->parser_context->profile) ||
+            (prior_primaries != AVCOL_PRI_UNSPECIFIED && c->parser_context->color_primaries != AVCOL_PRI_UNSPECIFIED && prior_primaries != c->parser_context->color_primaries) ||
+            (prior_transfer != AVCOL_TRC_UNSPECIFIED && c->parser_context->color_trc != AVCOL_TRC_UNSPECIFIED && prior_transfer != c->parser_context->color_trc) ||
+            (prior_matrix != AVCOL_SPC_UNSPECIFIED && c->parser_context->colorspace != AVCOL_SPC_UNSPECIFIED && prior_matrix != c->parser_context->colorspace) ||
+            (prior_range != AVCOL_RANGE_UNSPECIFIED && c->parser_context->color_range != AVCOL_RANGE_UNSPECIFIED && prior_range != c->parser_context->color_range) ||
+            (prior_chroma != AVCHROMA_LOC_UNSPECIFIED && c->parser_context->chroma_sample_location != AVCHROMA_LOC_UNSPECIFIED && prior_chroma != c->parser_context->chroma_sample_location) ||
+            (prior_sar.num > 0 && prior_sar.den > 0 && c->parser_context->sample_aspect_ratio.num > 0 && c->parser_context->sample_aspect_ratio.den > 0 &&
+             av_cmp_q(prior_sar, c->parser_context->sample_aspect_ratio)))) {
+            av_log(avctx, AV_LOG_ERROR, "DUSKCUT_MF_DYNAMIC_FORMAT_UNSUPPORTED: This video changes bit depth, chroma, profile, colour or pixel aspect ratio within one stream. Split it into fixed-format clips before importing.\n");
+            c->failed = 1;
+            return AVERROR(ENOSYS);
+        }
         if (c->parser->format >= 0) c->source_format = c->parser->format;
         if (c->parser_context->profile >= 0) avctx->profile = c->parser_context->profile;
         if (c->parser_context->level >= 0) avctx->level = c->parser_context->level;
@@ -514,7 +541,20 @@ static int mf_set_input(AVCodecContext *avctx, const AVPacket *packet)
             rate = config.sample_rate;
             channels = config.channels;
         }
-        if (payload == 3 && packet && mf_latm_config(avctx, packet, &config) >= 0) {
+        if (payload == 3) {
+            /* After a raw LATM input seek the first packet may reference a
+             * previous StreamMuxConfig. Windows silently discards such packets
+             * until another config arrives, losing the beginning of the audio
+             * window. DuskCut decodes these transports from the beginning and
+             * trims decoded PCM instead. Never accept a truncated fast seek. */
+            if (!packet || mf_latm_config(avctx, packet, &config) < 0) {
+                av_log(avctx, AV_LOG_ERROR, "DUSKCUT_MF_LATM_SEEK_UNSUPPORTED: "
+                       "LATM audio requires its initial stream configuration. "
+                       "Decode from the beginning and trim decoded audio.\n");
+                c->failed = 1;
+                ret = AVERROR_INVALIDDATA;
+                goto done;
+            }
             rate = config.sample_rate;
             channels = config.channels;
         }

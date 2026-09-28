@@ -47,12 +47,17 @@ for (const f of fixtures) {
     if (!made.ok) throw new Error(`Fixture ${f.name}: ${made.stderr}`)
   }
   for (const seek of [0, 0.733]) {
-    const options = [...(seek ? ['-ss', String(seek)] : []), '-i', path]
+    // Standalone AAC transport seeks need decoder history. Match the editor:
+    // decode from the initial configuration and trim decoded PCM. MP4/video
+    // remain on the fast, indexed input-seek path.
+    const decodedTrim = seek && (f.adts || f.latm)
+    const options = [...(seek && !decodedTrim ? ['-ss', String(seek)] : []), '-i', path,
+      ...(decodedTrim ? ['-af', `atrim=start=${seek},asetpts=PTS-STARTPTS`] : [])]
     const out = f.video ? ['-an', '-pix_fmt', f.name.includes('10') ? 'yuv420p10le' : 'yuv420p', '-f', 'rawvideo', '-'] : ['-vn', '-c:a', 'pcm_f32le', '-f', 'wav', '-']
     const native = invoke(reference, [...options, ...out])
     const system = invoke(candidate, ['-c:' + (f.video ? 'v' : 'a'), f.codec || 'aac_mf', ...options, ...out])
     if (!f.video) { native.bytes = wavePayload(native.bytes); system.bytes = wavePayload(system.bytes) }
-    const row = { fixture: f.name, seek, referenceOk: native.ok, ok: system.ok, referenceBytes: native.bytes.length,
+    const row = { fixture: f.name, seek, seekMode: decodedTrim ? 'decoded-trim' : 'indexed-input', referenceOk: native.ok, ok: system.ok, referenceBytes: native.bytes.length,
       systemBytes: system.bytes.length, error: system.error, stderr: system.stderr,
       identical: native.bytes.equals(system.bytes), sha256: createHash('sha256').update(system.bytes).digest('hex') }
     if (!f.video && native.ok && system.ok && native.bytes.length && system.bytes.length) {
@@ -79,6 +84,15 @@ for (const f of fixtures) {
     row.passed = native.ok && (f.unsupported
       ? !system.ok && !system.error && system.bytes.length === 0 && /DUSKCUT_MF_PROFILE_UNSUPPORTED/.test(system.stderr)
       : system.ok && native.bytes.length === system.bytes.length && (f.video ? row.identical : row.audioRmse < 0.0001))
+    results.push(row)
+    console.log(JSON.stringify(row))
+  }
+  if (f.latm) {
+    const seeked = invoke(candidate, ['-c:a', 'aac_latm_mf', '-ss', '0.733', '-i', path,
+      '-vn', '-c:a', 'pcm_f32le', '-f', 'wav', '-'])
+    const row = { fixture: f.name, seek: 0.733, seekMode: 'unsupported-raw-input',
+      passed: !seeked.ok && !seeked.error && /DUSKCUT_MF_LATM_SEEK_UNSUPPORTED/.test(seeked.stderr),
+      error: seeked.error, stderr: seeked.stderr }
     results.push(row)
     console.log(JSON.stringify(row))
   }

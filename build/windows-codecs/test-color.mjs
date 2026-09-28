@@ -38,8 +38,17 @@ for (const c of cases) {
   const args = ['-i', file, '-vf', 'showinfo', '-frames:v', '1', '-c:v', 'rawvideo', '-f', 'null', '-']
   const native = metadata(call(reference, args))
   const windows = metadata(call(candidate, ['-c:v', c.codec + '_mf', ...args]))
+  // Compare identical sample layouts without changing the signalled range.
+  // This detects silent 10-to-8-bit negotiation as well as pixel corruption.
+  const pixelArgs = ['-v', 'error', '-i', file, '-vf', `scale=in_range=${c.range}:out_range=${c.range}`,
+    '-pix_fmt', c.ten ? 'yuv420p10le' : 'yuv420p', '-frames:v', '6', '-f', 'rawvideo', '-']
+  const nativePixels = call(reference, pixelArgs)
+  const windowsPixels = call(candidate, ['-c:v', c.codec + '_mf', ...pixelArgs])
+  const pixels = { nativeBytes: nativePixels.out.length, windowsBytes: windowsPixels.out.length,
+    exact: nativePixels.ok && windowsPixels.ok && nativePixels.out.length > 0 && nativePixels.out.equals(windowsPixels.out) }
   const row = { name: c.name, native, windows,
-    passed: native.ok && windows.ok && native.color === windows.color && native.sar === windows.sar,
+    pixels,
+    passed: native.ok && windows.ok && native.color === windows.color && native.sar === windows.sar && pixels.exact,
     staticHdrCoverage: c.hdr ? {
       mastering: windows.hdr.some((x) => /Mastering display metadata/.test(x)),
       contentLight: windows.hdr.some((x) => /Content light level/.test(x))
