@@ -52,7 +52,7 @@ for (const f of fixtures) {
     // remain on the fast, indexed input-seek path.
     const decodedTrim = seek && (f.adts || f.latm)
     const options = [...(seek && !decodedTrim ? ['-ss', String(seek)] : []), '-i', path,
-      ...(decodedTrim ? ['-af', `atrim=start=${seek},asetpts=PTS-STARTPTS`] : [])]
+      ...(decodedTrim ? ['-ss', String(seek)] : [])]
     const out = f.video ? ['-an', '-pix_fmt', f.name.includes('10') ? 'yuv420p10le' : 'yuv420p', '-f', 'rawvideo', '-'] : ['-vn', '-c:a', 'pcm_f32le', '-f', 'wav', '-']
     const native = invoke(reference, [...options, ...out])
     const system = invoke(candidate, ['-c:' + (f.video ? 'v' : 'a'), f.codec || 'aac_mf', ...options, ...out])
