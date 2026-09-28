@@ -6,3 +6,5 @@
 *.yml text eol=lf
 *.tar.* -text
 *.zip -text
+# Runtime review documents are evidence bytes bound by SHA-256, not source text to normalize.
+public-source/runtime-review/** -text
