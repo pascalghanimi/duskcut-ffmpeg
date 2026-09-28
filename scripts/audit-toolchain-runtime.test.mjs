@@ -28,7 +28,8 @@ test('wrong run, failed run, changed binary or floating image is rejected', () =
 
 function runtimeFixture() {
   const report = { compiler: BINDING.compiler, compilerVersion: BINDING.compilerVersion,
-    archives: RUNTIMES.map(name => ({ name, path: '/opt/ct-ng/x86_64-w64-mingw32/lib/' + name, bytes: 42, sha256: 'a'.repeat(64) })) }
+    archives: RUNTIMES.map(name => ({ name, path: '/opt/ct-ng/x86_64-w64-mingw32/lib/' + name, bytes: 42, sha256: 'a'.repeat(64),
+      linkTraceFiles: [{ recordedPath: '/opt/ct-ng/x86_64-w64-mingw32/lib/' + name, resolvedPath: '/opt/ct-ng/x86_64-w64-mingw32/lib/' + name, bytes: 42, sha256: 'a'.repeat(64) }] })) }
   return { report, linked: new Set(report.archives.map(row => row.path)) }
 }
 
@@ -36,7 +37,7 @@ test('each requested runtime receives a content hash and actual linked archives 
   const { report, linked } = runtimeFixture()
   assert.doesNotThrow(() => verifyRuntimeReport(report, linked))
   linked.delete(report.archives[0].path)
-  assert.throws(() => verifyRuntimeReport(report, linked), /actual_link_trace/)
+  assert.throws(() => verifyRuntimeReport(report, linked), /link_trace_archive/)
 })
 
 test('a substituted or escaped compiler archive cannot enter the provenance record', () => {
@@ -57,11 +58,28 @@ test('inspection is offline, read-only, unprivileged and receives no host mounts
   assert.throws(() => containerArguments('different-image'), /unreviewed/)
 })
 
-test('actual GCC relative search paths normalize to canonical archive locations', () => {
+test('actual GCC paths are preserved for symlink-aware resolution inside the original image', () => {
   const trace = '/opt/ct-ng/lib/gcc/x86_64-w64-mingw32/16.2.0/../../../../x86_64-w64-mingw32/lib/../lib/libatomic.a\n' +
     '/opt/ct-ng/lib/gcc/x86_64-w64-mingw32/16.2.0/../../../../x86_64-w64-mingw32/lib/../lib/libgomp.a\n' +
     'gcc -o test /opt/ct-ng/not-a-trace.a\n'
   assert.deepEqual([...linkedArchivePaths(trace)], [
-    '/opt/ct-ng/x86_64-w64-mingw32/lib/libatomic.a', '/opt/ct-ng/x86_64-w64-mingw32/lib/libgomp.a',
+    '/opt/ct-ng/lib/gcc/x86_64-w64-mingw32/16.2.0/../../../../x86_64-w64-mingw32/lib/../lib/libatomic.a',
+    '/opt/ct-ng/lib/gcc/x86_64-w64-mingw32/16.2.0/../../../../x86_64-w64-mingw32/lib/../lib/libgomp.a',
   ])
+  assert.doesNotThrow(() => containerArguments(BINDING.image, linkedArchivePaths(trace)))
+})
+
+test('symlinked compiler archives match only after resolving and hashing actual link paths in the pinned image', () => {
+  const { report, linked } = runtimeFixture()
+  const entry = report.archives[0]
+  entry.path = '/opt/ct-ng/x86_64-w64-mingw32/runtime/lib/libatomic.a'
+  entry.linkTraceFiles[0].resolvedPath = entry.path
+  assert.doesNotThrow(() => verifyRuntimeReport(report, linked))
+  entry.linkTraceFiles[0].sha256 = 'b'.repeat(64)
+  assert.throws(() => verifyRuntimeReport(report, linked), /link_trace_archive_does_not_match/)
+})
+
+test('untrusted host paths cannot enter the read-only container inspection', () => {
+  assert.throws(() => containerArguments(BINDING.image, new Set(['/etc/libatomic.a'])), /unsafe_link_trace_path/)
+  assert.throws(() => containerArguments(BINDING.image, new Set(['/opt/ct-ng/../../libatomic.a'])), /unsafe_link_trace_path/)
 })

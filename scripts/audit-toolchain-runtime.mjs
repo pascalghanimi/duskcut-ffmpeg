@@ -47,34 +47,59 @@ export function verifyRuntimeReport(report, linkedPaths) {
         !/^[a-f0-9]{64}$/.test(entry.sha256) || !entry.path?.startsWith('/opt/ct-ng/') ||
         entry.path.split('/').includes('..') || !entry.path.endsWith('/' + entry.name)) throw new Error('invalid_runtime_archive_record')
     names.add(entry.name)
-    if (['libatomic.a', 'libgomp.a'].includes(entry.name) && !linkedPaths.has(entry.path)) throw new Error('runtime_not_found_in_actual_link_trace')
+    if (!Array.isArray(entry.linkTraceFiles)) throw new Error('missing_resolved_link_trace')
+    for (const traced of entry.linkTraceFiles) {
+      if (!linkedPaths.has(traced.recordedPath) || posix.basename(traced.recordedPath) !== entry.name ||
+          traced.resolvedPath !== entry.path || traced.bytes !== entry.bytes || traced.sha256 !== entry.sha256) throw new Error('link_trace_archive_does_not_match_compiler_archive')
+    }
+    if (['libatomic.a', 'libgomp.a'].includes(entry.name) && !entry.linkTraceFiles.length) throw new Error('runtime_not_found_in_actual_link_trace')
   }
 }
 
-export function containerArguments(image) {
+export function containerArguments(image, linkedPaths = new Set()) {
   if (image !== BINDING.image) throw new Error('unreviewed_compiler_image')
+  const paths = [...linkedPaths].filter(path => RUNTIMES.includes(posix.basename(path)))
+  if (paths.length > 100 || paths.some(path => !/^\/opt\/ct-ng\/[A-Za-z0-9_./+-]+\.a$/.test(path) || !posix.normalize(path).startsWith('/opt/ct-ng/'))) throw new Error('unsafe_link_trace_path')
   return ['run', '--rm', '--pull=never', '--network=none', '--read-only', '--cap-drop=ALL',
     '--security-opt=no-new-privileges', '--user', '65534:65534', '--tmpfs', '/tmp:rw,noexec,nosuid,size=16m',
-    '-i', image, 'python3', '-', BINDING.compiler, ...RUNTIMES]
+    '-i', image, 'python3', '-', BINDING.compiler, JSON.stringify(paths), ...RUNTIMES]
 }
 
 export function linkedArchivePaths(log) {
+  // Preserve the exact ld path: lexical '..' normalization before resolving a
+  // symlink can select a different file. Resolve inside the original image.
   return new Set(log.split(/\r?\n/).map(line => line.trim())
-    .filter(line => /^\/opt\/ct-ng\/[^\s]+\.a$/.test(line)).map(line => posix.normalize(line)))
+    .filter(line => /^\/opt\/ct-ng\/[^\s]+\.a$/.test(line)))
 }
 
 const INSPECT = `import hashlib,json,pathlib,subprocess,sys
 cc=sys.argv[1]
+linked_paths=json.loads(sys.argv[2])
 records=[]
-for name in sys.argv[2:]:
-    path=pathlib.Path(subprocess.check_output([cc,'-print-file-name='+name],text=True).strip()).resolve(strict=True)
+def identity(raw_path,name):
+    path=pathlib.Path(raw_path).resolve(strict=True)
     if not path.is_file() or not path.is_relative_to('/opt/ct-ng') or path.name!=name:
-        raise SystemExit('Runtime archive is outside the fixed compiler tree')
+        raise ValueError('Runtime archive is outside the fixed compiler tree')
     with path.open('rb') as stream:
-        if stream.read(8)!=b'!<arch>\\n': raise SystemExit('Expected an ar archive')
+        if stream.read(8)!=b'!<arch>\\n': raise ValueError('Expected an ar archive')
         stream.seek(0)
         digest=hashlib.file_digest(stream,'sha256').hexdigest()
-    records.append({'name':name,'path':str(path),'bytes':path.stat().st_size,'sha256':digest})
+    return {'path':str(path),'bytes':path.stat().st_size,'sha256':digest}
+for name in sys.argv[3:]:
+    entry={'name':name,'linkTraceFiles':[]}
+    try:
+        reported_path=subprocess.check_output([cc,'-print-file-name='+name],text=True).strip()
+        entry.update({'reportedPath':reported_path,**identity(reported_path,name)})
+        for linked in linked_paths:
+            if pathlib.PurePosixPath(linked).name==name:
+                try:
+                    info=identity(linked,name)
+                    entry['linkTraceFiles'].append({'recordedPath':linked,'resolvedPath':info['path'],'bytes':info['bytes'],'sha256':info['sha256']})
+                except Exception as error:
+                    entry['linkTraceFiles'].append({'recordedPath':linked,'errorType':type(error).__name__})
+    except Exception as error:
+        entry['errorType']=type(error).__name__
+    records.append(entry)
 print(json.dumps({'compiler':cc,'compilerVersion':subprocess.check_output([cc,'--version'],text=True).splitlines()[0],'archives':records}))
 `
 
@@ -110,17 +135,24 @@ export async function audit(artifactArg, runArg, outputArg) {
   const linkedPaths = linkedArchivePaths(compileLog)
   const inspected = JSON.parse(execFileSync('docker', ['image', 'inspect', BINDING.image], { encoding: 'utf8' }))[0]
   if (inspected.Id !== BINDING.imageId || !inspected.RepoDigests?.includes(BINDING.image)) throw new Error('local_image_does_not_match_build_toolchain')
-  const report = JSON.parse(execFileSync('docker', containerArguments(BINDING.image), { input: INSPECT, encoding: 'utf8', maxBuffer: 1024 * 1024 }))
-  verifyRuntimeReport(report, linkedPaths)
+  const report = JSON.parse(execFileSync('docker', containerArguments(BINDING.image, linkedPaths), { input: INSPECT, encoding: 'utf8', maxBuffer: 1024 * 1024 }))
   const output = resolve(outputArg)
   if (existsSync(output)) throw new Error('audit_output_already_exists')
   await mkdir(output, { recursive: true })
+  // Keep public, bounded compiler-path/hash evidence even if the final linkage
+  // check fails. It is explicitly not a completed or approved audit record.
+  await writeFile(resolve(output, 'runtime-audit-diagnostics.json'), JSON.stringify({
+    schemaVersion: 1, status: 'captured-before-linkage-verification', buildRunId: BINDING.runId,
+    lockSha256: BINDING.lockSha256, image: BINDING.image, imageId: BINDING.imageId,
+    linkedArchivePaths: [...linkedPaths], inspection: report,
+  }, null, 2) + '\n', { flag: 'wx' })
+  verifyRuntimeReport(report, linkedPaths)
   const record = {
     schemaVersion: 1, kind: 'post-build-toolchain-runtime-provenance', recordedAt: new Date().toISOString(),
     build: { repository: BINDING.repository, runId: run.id, recipeCommit: BINDING.recipeCommit,
       lockSha256: BINDING.lockSha256, binaryHashes: BINDING.binaryHashes, evidenceSha256 },
     toolchain: { image: BINDING.image, imageId: BINDING.imageId, compiler: report.compiler, compilerVersion: report.compilerVersion },
-    archives: report.archives.map(entry => ({ ...entry, presentInBuildLinkTrace: linkedPaths.has(entry.path) })),
+    archives: report.archives.map(entry => ({ ...entry, presentInBuildLinkTrace: entry.linkTraceFiles.length > 0 })),
     inspection: { network: 'none', imageFilesystem: 'read-only', unprivilegedUid: 65534, mountedHostPaths: [] },
     scope: 'Records exact runtime archives from the original pinned compiler image. Does not modify the original build, source lock, or binaries; is not a legal approval.',
   }

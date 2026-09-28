@@ -37,9 +37,10 @@ jobs:
         run: node scripts/audit-toolchain-runtime.mjs audited-build run-metadata.json runtime-audit
 
       - name: Retain only the provenance report, not toolchain binaries
+        if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: runtime-audit-36355675824-${{ github.run_id }}
           path: runtime-audit/
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
