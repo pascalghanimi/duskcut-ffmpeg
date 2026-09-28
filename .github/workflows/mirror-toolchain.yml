@@ -1,0 +1,33 @@
+name: Preserve exact Windows cross-compiler image
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  mirror:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Pull and identify exact upstream compiler
+        env:
+          UPSTREAM: ghcr.io/btbn/ffmpeg-builds/base-win64@sha256:8e49c084ad3c3e725b23ce3c78d7b83d67b48d1b41b2da43c1137df5f9435d2e
+        run: |
+          docker pull "$UPSTREAM"
+          docker image inspect "$UPSTREAM" --format 'Upstream image ID: {{.Id}} / {{.Os}}-{{.Architecture}}'
+          docker run --rm --pull=never --network=none "$UPSTREAM" x86_64-w64-mingw32-gcc --version | head -n 1
+          docker run --rm --pull=never --network=none "$UPSTREAM" python3 --version
+
+      - name: Mirror immutable compiler environment into this public project
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPSTREAM: ghcr.io/btbn/ffmpeg-builds/base-win64@sha256:8e49c084ad3c3e725b23ce3c78d7b83d67b48d1b41b2da43c1137df5f9435d2e
+          TARGET: ghcr.io/pascalghanimi/duskcut-ffmpeg-toolchain:btbn-win64-20260928
+        run: |
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker tag "$UPSTREAM" "$TARGET"
+          docker push "$TARGET"
+          docker image inspect "$TARGET" --format '{{range .RepoDigests}}{{println .}}{{end}}'
