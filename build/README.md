@@ -11,8 +11,14 @@ Windows codecs must be installed and support the actual stream profile. HEVC can
 require the separately installed Windows extension; no native codec fallback is
 silently substituted. Hardware is used through Media Foundation where available.
 
-The build uses the BtbN recipe revision and base-win64 compiler image pinned in
-the source manifest. It rebuilds 39 selected source archives, including MinGW CRT
+The build uses the BtbN recipe revision and a base-win64 compiler image pinned in
+`toolchain-pin.json`. The immutable source release still records the original
+upstream image digest. BtbN removed that digest from GHCR after the first build,
+so the exact current upstream image is preserved under this project's GHCR
+namespace by `mirror-toolchain.yml`; the lock records both provenance digests,
+the original source-manifest digest, and the mirror run. A mirror is not a new
+compiler build, nor an implicit substitution of the original source release.
+It rebuilds 39 selected source archives, including MinGW CRT
 and winpthreads. All dependency and FFmpeg compilation runs with network access
 disabled. The oneVPL patch is an archived, hash-checked input, applied locally.
 The pinned FreeType snapshots omit their `dlg` git submodule. A separately
@@ -40,9 +46,10 @@ and 16 GB RAM. The compiler image contains Python and build tools.
    node build/validate-lock.mjs input-data/build-lock.json
    ```
 
-3. Pull the exact compiler image recorded as `toolchain.image` in the lock. This
-   provisioning step needs network access; compilation does not. Never substitute
-   a floating `latest` tag.
+3. Pull the exact mirrored compiler image recorded as `toolchain.image` in the
+   lock. Check its original-upstream provenance in `toolchain-pin.json` and the
+   recorded mirror run. This provisioning step needs network access; compilation
+   does not. Never substitute a floating `latest` tag.
 4. Build into a new, dedicated directory:
 
    ```sh

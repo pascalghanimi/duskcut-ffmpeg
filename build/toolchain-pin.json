@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "sourceManifestImage": "ghcr.io/btbn/ffmpeg-builds/base-win64@sha256:ca6aaa981df5fe20d341f2f7e681875266adddabe117add1367765471d7d30ea",
+  "upstreamImage": "ghcr.io/btbn/ffmpeg-builds/base-win64@sha256:8e49c084ad3c3e725b23ce3c78d7b83d67b48d1b41b2da43c1137df5f9435d2e",
+  "mirrorImage": "ghcr.io/pascalghanimi/duskcut-ffmpeg-toolchain@sha256:e141e607136fafad34df5a62c50e28431e0c6d04877e7657c8c9c244371194be",
+  "mirrorRunId": 36445800255,
+  "gccVersion": "16.2.0",
+  "note": "The source release's original image digest was deleted upstream; the exact replacement was copied without rebuilding to a public, anonymously readable project GHCR package. The mirror job records the source digest, compiler version, source image ID and destination digest."
+}

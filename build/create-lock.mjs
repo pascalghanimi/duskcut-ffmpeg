@@ -14,6 +14,17 @@ const manifestFile = directoryMode ? resolve(manifestArg, 'source-manifest.json'
 const outputRoot = directoryMode ? resolve(manifestArg) : dirname(manifestFile)
 const sourcePrefix = directoryMode ? 'sources/' : ''
 const manifest = JSON.parse(readFileSync(manifestFile, 'utf8'))
+// The upstream BtbN registry rotates old digest manifests out within minutes.
+// Bind a separately preserved, content-addressed mirror explicitly while
+// retaining the unmodified source release's original toolchain declaration.
+const toolchainPin = JSON.parse(readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), 'toolchain-pin.json'), 'utf8'))
+if (toolchainPin.schemaVersion !== 1 || toolchainPin.sourceManifestImage !== manifest.toolchain.image ||
+    toolchainPin.gccVersion !== manifest.toolchain.gccVersion ||
+    !/^ghcr\.io\/btbn\/ffmpeg-builds\/base-win64@sha256:[a-f0-9]{64}$/.test(toolchainPin.upstreamImage) ||
+    !/^ghcr\.io\/pascalghanimi\/duskcut-ffmpeg-toolchain@sha256:[a-f0-9]{64}$/.test(toolchainPin.mirrorImage) ||
+    !Number.isSafeInteger(toolchainPin.mirrorRunId) || toolchainPin.mirrorRunId < 1) {
+  throw new Error('unreviewed_or_unpinned_compiler_mirror')
+}
 const supplementFile = resolve(outputRoot, 'sources/supplemental-manifest.json')
 const supplement = JSON.parse(readFileSync(supplementFile, 'utf8'))
 const release = JSON.parse(readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../release-assets.json'), 'utf8'))
@@ -67,7 +78,8 @@ const lock = {
   oneVplPatch: { blobId: requireFile('onevpl-patch').id },
   freetypeDlg: { blobId: requireFile('freetype-dlg').id, revision: supplement.freetypeDlg.revision,
     parentRevision: supplement.freetypeDlg.parentRevision, noticeBlobId: requireFile('freetype-dlg-license').id },
-  toolchain: { image: manifest.toolchain.image },
+  toolchain: { image: toolchainPin.mirrorImage, sourceManifestImage: manifest.toolchain.image,
+    upstreamImage: toolchainPin.upstreamImage, mirrorRunId: toolchainPin.mirrorRunId },
   runtimeComponents: [
     { name: 'MinGW-w64 CRT and winpthreads', version: '57b595039040eaa15bece85b7cc71d952281b269', license: 'MinGW-w64 licenses retained in corresponding source', noticeBlobId: noticeIds.get(mingwNotice.file), sourceBlobId: requireFile('10-mingw').id },
     runtime('GCC libgcc', 'gcc-libgcc2-c'), runtime('GCC libgomp', 'gcc-libgomp-h'), runtime('GCC libstdc++', 'gcc-new-op-cc'),
