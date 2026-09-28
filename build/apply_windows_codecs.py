@@ -7,7 +7,8 @@ import subprocess
 import sys
 
 
-SOURCE_FILES = ("configure", "libavcodec/Makefile", "libavcodec/allcodecs.c", "libavcodec/mf_utils.c", "libavcodec/mfdec.c")
+SOURCE_FILES = ("configure", "libavcodec/Makefile", "libavcodec/allcodecs.c", "libavcodec/mf_utils.c",
+                "libavcodec/h264_parser.c", "libavcodec/hevc/parser.c", "libavcodec/mfdec.c")
 
 
 def apply(source, controls, evidence):

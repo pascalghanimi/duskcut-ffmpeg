@@ -174,7 +174,8 @@ class Fixture:
             self.evidence_files['work/configuration/' + name] = data
         self.evidence_files['work/configuration/codec-policy-audit.json'] = module.json_bytes(policy.verify(json.loads(profile), configs))
         controls = {name: module.digest_bytes(self.controls[name]) for name in ('windows-codecs/apply.py', 'windows-codecs/mfdec.c')}
-        files = ['configure', 'libavcodec/Makefile', 'libavcodec/allcodecs.c', 'libavcodec/mf_utils.c', 'libavcodec/mfdec.c']
+        files = ['configure', 'libavcodec/Makefile', 'libavcodec/allcodecs.c', 'libavcodec/mf_utils.c',
+                 'libavcodec/h264_parser.c', 'libavcodec/hevc/parser.c', 'libavcodec/mfdec.c']
         source = {'schemaVersion': 1, 'controls': controls, 'files': [
             {'file': name, 'beforeSha256': 'a' * 64, 'afterSha256': controls['windows-codecs/mfdec.c'] if name.endswith('/mfdec.c') else 'b' * 64}
             for name in files]}

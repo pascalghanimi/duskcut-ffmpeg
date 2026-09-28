@@ -350,8 +350,9 @@ def verify_windows_codec_evidence(evidence, members, snapshot, profile):
                 for name in ('windows-codecs/apply.py', 'windows-codecs/mfdec.c')}
     files = source.get('files', [])
     if (source.get('schemaVersion') != 1 or source.get('controls') != controls
-            or len(files) != 5 or {row.get('file') for row in files} != {
-                'configure', 'libavcodec/Makefile', 'libavcodec/allcodecs.c', 'libavcodec/mf_utils.c', 'libavcodec/mfdec.c'}
+            or len(files) != 7 or {row.get('file') for row in files} != {
+                'configure', 'libavcodec/Makefile', 'libavcodec/allcodecs.c', 'libavcodec/mf_utils.c',
+                'libavcodec/h264_parser.c', 'libavcodec/hevc/parser.c', 'libavcodec/mfdec.c'}
             or any(not HASH.fullmatch(str(row.get('afterSha256'))) for row in files)
             or next(row for row in files if row['file'] == 'libavcodec/mfdec.c')['afterSha256']
                 != controls['windows-codecs/mfdec.c']):

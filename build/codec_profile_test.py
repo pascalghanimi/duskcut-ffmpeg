@@ -79,11 +79,13 @@ class PatchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="duskcut-mf-patch-") as root:
             root = Path(root)
             source, controls, evidence = (root / name for name in ("source", "controls", "evidence"))
-            (source / "libavcodec").mkdir(parents=True)
+            (source / "libavcodec/hevc").mkdir(parents=True)
             (controls / "windows-codecs").mkdir(parents=True)
             original = {'configure': 'aac_mf_encoder_deps="mediafoundation"\n',
                         'libavcodec/Makefile': "# codec objects\n",
                         'libavcodec/allcodecs.c': "extern const FFCodec ff_aac_mf_encoder;\n",
+                        'libavcodec/h264_parser.c': "            avctx->profile = ff_h264_get_profile(sps);\n",
+                        'libavcodec/hevc/parser.c': "    avctx->profile  = sps->ptl.general_ptl.profile_idc;\n",
                         'libavcodec/mf_utils.c': """call1(s, sizeof(s), NULL);
 call2(s, sizeof(s), NULL);
     hr = f->MFCreateAlignedMemoryBuffer(size, align - 1, &buffer);
@@ -104,11 +106,14 @@ call2(s, sizeof(s), NULL);
             patcher.apply(source, controls, evidence)
             self.assertEqual((source / "libavcodec/mfdec.c").read_bytes(), (own / "mfdec.c").read_bytes())
             record = json.loads((evidence / "windows-codecs-source.json").read_text())
-            self.assertEqual(len(record["files"]), 5)
+            self.assertEqual(len(record["files"]), 7)
             patch = (evidence / "windows-codecs.patch").read_text()
             self.assertIn("--- /dev/null", patch)
             self.assertIn("+++ b/libavcodec/mfdec.c", patch)
             self.assertIn("h264_mf_decoder_deps", patch)
+            for name in ("libavcodec/h264_parser.c", "libavcodec/hevc/parser.c"):
+                self.assertIn("+++ b/" + name, patch)
+                self.assertIn("avctx->color_primaries = vui->colour_primaries;", (source / name).read_text())
             with self.assertRaisesRegex(ValueError, "already exists"):
                 patcher.apply(source, controls, evidence)
 
