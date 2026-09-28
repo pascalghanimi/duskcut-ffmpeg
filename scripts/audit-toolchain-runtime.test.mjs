@@ -20,6 +20,13 @@ test('audit binds the exact successful build and its original compiler identity'
   assert.doesNotThrow(() => verifyIdentity(fixture(), BINDING))
 })
 
+test('audit accepts only the recorded public compiler mirror, not another image', async () => {
+  const pin = JSON.parse(await readFile(new URL('../build/toolchain-pin.json', import.meta.url), 'utf8'))
+  assert.doesNotThrow(() => validateBinding({ ...BINDING, image: pin.mirrorImage }))
+  assert.throws(() => validateBinding({ ...BINDING,
+    image: 'ghcr.io/pascalghanimi/duskcut-ffmpeg-toolchain@sha256:' + 'f'.repeat(64) }), /invalid_runtime_audit_binding/)
+})
+
 test('wrong run, failed run, changed binary or floating image is rejected', () => {
   for (const mutate of [x => { x.run.id++ }, x => { x.run.conclusion = 'failure' },
     x => { x.result.binaryHashes['ffmpeg.exe'] = 'f'.repeat(64) },

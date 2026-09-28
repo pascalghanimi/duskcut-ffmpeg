@@ -4,7 +4,7 @@ import { createReadStream, existsSync, readFileSync } from 'node:fs'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { execFileSync } from 'node:child_process'
 import { posix, resolve } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 export const REPOSITORY = 'pascalghanimi/duskcut-ffmpeg'
 // Retained solely as a regression fixture for the original completed .1 audit.
@@ -25,13 +25,15 @@ export const BINDING = Object.freeze({
   }),
 })
 export const RUNTIMES = Object.freeze(['libatomic.a', 'libgomp.a', 'libgcc.a', 'libgcc_eh.a', 'libstdc++.a'])
+const MIRRORED_COMPILER = JSON.parse(readFileSync(resolve(fileURLToPath(new URL('../build/toolchain-pin.json', import.meta.url))), 'utf8')).mirrorImage
 
 export function validateBinding(binding) {
   if (binding?.repository !== REPOSITORY || !Number.isSafeInteger(binding.runId) || binding.runId < 1 ||
       !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$/.test(binding.buildId || '') ||
       !/^[a-f0-9]{40}$/.test(binding.recipeCommit || '') || !/^[a-f0-9]{40}$/.test(binding.ffmpegRevision || '') ||
       !/^[a-f0-9]{64}$/.test(binding.lockSha256 || '') ||
-      !/^ghcr\.io\/btbn\/ffmpeg-builds\/base-win64@sha256:[a-f0-9]{64}$/.test(binding.image || '') ||
+      !(/^ghcr\.io\/btbn\/ffmpeg-builds\/base-win64@sha256:[a-f0-9]{64}$/.test(binding.image || '') ||
+        binding.image === MIRRORED_COMPILER) ||
       !/^sha256:[a-f0-9]{64}$/.test(binding.imageId || '') ||
       binding.compiler !== 'x86_64-w64-mingw32-gcc' ||
       typeof binding.compilerVersion !== 'string' || binding.compilerVersion.length > 200 ||
