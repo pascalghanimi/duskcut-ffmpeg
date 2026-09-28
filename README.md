@@ -5,12 +5,17 @@ The private DuskCut editor is not part of this repository.
 
 ## Status
 
-The first controlled build and native compatibility review are in progress. This repository is not yet a
-download or source-completeness claim for a released DuskCut installer.
+Controlled build `9.0.2-duskcut.1` has passed source, runtime and native compatibility
+review. Its [versioned release](https://github.com/pascalghanimi/duskcut-ffmpeg/releases/tag/9.0.2-duskcut.1)
+provides the Windows tools and their matching corresponding-source archive.
+See [the review and its limits](docs/9.0.2-duskcut.1-review.md).
+This is a standalone FFmpeg component release, not a DuskCut editor installer.
 
 The selected build keeps the software codecs, audio/video filters, subtitle
 support and hardware interfaces needed by DuskCut. It does not include DVD
-navigation or DVD CSS decryption, and does not ship ffplay.
+optical-disc navigation libraries or DVD CSS decryption, and does not ship ffplay.
+Ordinary DVD subtitle/MPEG formats and the DVD navigation data parser are not
+decryption and remain supported.
 
 Build inputs are fixed by SHA-256 and source revision. Dependency compilation
 and FFmpeg compilation run with networking disabled. Build configuration,
