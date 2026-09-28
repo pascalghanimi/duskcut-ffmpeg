@@ -2,6 +2,7 @@
 import importlib.util
 import io
 import json
+import os
 import pathlib
 import subprocess
 import tarfile
@@ -495,6 +496,18 @@ class ReleaseTests(unittest.TestCase):
             fixture.write(root, 'runtime-review.json', module.json_bytes(manifest))
             with self.subTest(group=group, key=key), self.assertRaises(ValueError):
                 fixture.package(root)
+
+    def test_epoch_dated_source_notices_package_as_identical_bytes_with_fixed_zip_dates(self):
+        fixture = self.fixture
+        notice = fixture.inputs / 'sources/distribution/LICENSE'
+        original = notice.read_bytes()
+        os.utime(notice, (0, 0))
+        candidate = fixture.package()
+        runtime = fixture.root / 'result' / pathlib.PurePosixPath(candidate['archive']['url']).name
+        with zipfile.ZipFile(runtime) as archive:
+            self.assertEqual(archive.read('LICENSE'), original)
+            self.assertTrue(all(info.date_time == (1980, 1, 1, 0, 0, 0) for info in archive.infolist()))
+        self.assertEqual(notice.stat().st_mtime, 0)
 
     def test_only_exact_audited_public_security_fixture_is_preserved_without_redaction(self):
         fixture = self.fixture

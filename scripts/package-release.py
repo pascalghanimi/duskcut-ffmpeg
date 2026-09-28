@@ -9,6 +9,7 @@ import json
 import pathlib
 import posixpath
 import re
+import shutil
 import subprocess
 import tarfile
 import zipfile
@@ -482,6 +483,21 @@ def add_tar_file(archive, name, path):
         archive.addfile(info, source)
 
 
+def add_zip_content(archive, name, content):
+    # Source TARs deliberately carry epoch timestamps. ZIP cannot represent dates
+    # before 1980; use a fixed ZIP-only timestamp without altering source bytes.
+    info = zipfile.ZipInfo(safe_name(name), date_time=(1980, 1, 1, 0, 0, 0))
+    info.compress_type = zipfile.ZIP_DEFLATED
+    info.create_system = 3
+    info.external_attr = 0o100644 << 16
+    with archive.open(info, 'w') as target:
+        if isinstance(content, bytes):
+            target.write(content)
+        else:
+            with pathlib.Path(content).open('rb') as source:
+                shutil.copyfileobj(source, target, length=1024 * 1024)
+
+
 def package(artifact, inputs, repository, output, version, runtime_review=None):
     artifact, inputs, repository, output = map(pathlib.Path, (artifact, inputs, repository, output))
     if output.exists():
@@ -650,11 +666,10 @@ This adds documentation; it does not alter the original source lock or binaries.
     inventory = []
     with zipfile.ZipFile(runtime_path, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=6, allowZip64=False) as archive:
         for name, content in sorted(runtime.items()):
+            add_zip_content(archive, name, content)
             if isinstance(content, bytes):
-                archive.writestr(name, content)
                 entry_identity = {'size': len(content), 'sha256': digest_bytes(content)}
             else:
-                archive.write(content, arcname=name)
                 entry_identity = identity(content)
             inventory.append({'archivePath': name, 'path': name, **entry_identity})
     if runtime_path.stat().st_size > MAX_RUNTIME_BYTES:
