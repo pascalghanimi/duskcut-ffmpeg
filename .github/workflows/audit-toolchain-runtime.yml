@@ -2,6 +2,11 @@ name: Inspect completed-build compiler runtimes
 
 on:
   workflow_dispatch:
+    inputs:
+      build_run:
+        description: Successful controlled-build run ID (binding is derived and verified from its artifact)
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -21,26 +26,27 @@ jobs:
           node-version: '24'
 
       - name: Test read-only audit boundaries
-        run: node --test scripts/audit-toolchain-runtime.test.mjs
+        run: node --test scripts/audit-toolchain-runtime.test.mjs scripts/prepare-runtime-audit.test.mjs
 
       - name: Retrieve the exact successful build
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          gh api repos/pascalghanimi/duskcut-ffmpeg/actions/runs/36355675824 > run-metadata.json
-          gh run download 36355675824 --repo pascalghanimi/duskcut-ffmpeg --name duskcut-ffmpeg-9.0.2-duskcut.1-36355675824 --dir audited-build
+          BUILD_RUN: ${{ inputs.build_run }}
+        run: node scripts/prepare-runtime-audit.mjs
 
       - name: Provision the original immutable compiler image
-        run: docker pull ghcr.io/btbn/ffmpeg-builds/base-win64@sha256:ca6aaa981df5fe20d341f2f7e681875266adddabe117add1367765471d7d30ea
+        run: |
+          image="$(node -p "JSON.parse(require('fs').readFileSync('runtime-audit-binding.json','utf8')).image")"
+          docker pull "$image"
 
       - name: Inspect compiler archives offline without modifying the build
-        run: node scripts/audit-toolchain-runtime.mjs audited-build run-metadata.json runtime-audit
+        run: node scripts/audit-toolchain-runtime.mjs audited-build run-metadata.json runtime-audit-binding.json runtime-audit
 
       - name: Retain only the provenance report, not toolchain binaries
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
-          name: runtime-audit-36355675824-${{ github.run_id }}
+          name: runtime-audit-${{ inputs.build_run }}-${{ github.run_id }}
           path: runtime-audit/
           if-no-files-found: warn
           retention-days: 30

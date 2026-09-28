@@ -89,6 +89,42 @@ native/application test suite before replacing installed resources. Signing
 changes executable bytes, so release records must retain both original built
 hashes and final signed hashes.
 
+## Post-build runtime audit for each new version
+
+Do not edit a previous version's review or substitute guessed run IDs/hashes.
+After the controlled build has completed successfully:
+
+1. Dispatch `audit-toolchain-runtime.yml` on `main`, supplying that exact
+   controlled build's numeric run ID as `build_run`. The audit workflow selects
+   its one matching, unexpired build artifact. It checks the GitHub run, recipe
+   commit, clean-tree record, actual binaries, archived lock, compiler image and
+   identical standalone/archived records before pulling any image.
+2. The generated `runtime-audit-binding.json` contains the actual build ID,
+   run ID, recipe commit, lock hash, binary hashes and compiler identity. No
+   source-code rebinding is needed for .2 or later releases. The original pinned
+   compiler image is inspected read-only, offline and without host mounts.
+3. Require a successful audit workflow, then download its
+   `runtime-audit-<build-run>-<audit-run>` artifact. Check its checksum file.
+   `libatomic-toolchain-audit.json` supplies actual archive hashes and resolved
+   original linker paths. Diagnostics alone are not a completed audit.
+4. Create a **new** `public-source/runtime-review/<buildId>/` directory. Run
+   direct PE/configuration inspection against that build's actual executables
+   and evidence; do not reuse an older compiled-runtime inspection. The four
+   immutable GCC license/source text files from an earlier review may be reused
+   only when the same compiler/source version and runtime archive identity are
+   corroborated; otherwise acquire and review the matching evidence.
+5. Add the new audit, new static inspection and a factual version-specific
+   explanation. Generate `runtime-review.json` from their actual byte sizes and
+   SHA-256 values, binding the new build ID, lock, binaries, compiler image and
+   actual libatomic hash. Keep old reviews unchanged. The historical local
+   review-preparation scripts may have .1-specific constants: do not run them
+   unchanged for a new version or merely rename their output.
+6. Commit the new review after inspection. Only then dispatch
+   `package-release.yml` with the same controlled-build run and version token
+   observed from **both** executables. Packaging independently verifies runtime
+   evidence against that build before producing a new draft. Functional testing,
+   review and publication remain separate steps.
+
 This pipeline addresses future controlled builds. It does not establish source
 completeness for older Gyan releases, automatically resolve codec patent rights,
 or constitute a legal guarantee.
