@@ -1,0 +1,112 @@
+{
+  "schemaVersion": 1,
+  "kind": "post-build-toolchain-runtime-provenance",
+  "recordedAt": "2026-09-28T16:34:20.623Z",
+  "build": {
+    "repository": "pascalghanimi/duskcut-ffmpeg",
+    "runId": 36446216471,
+    "buildId": "9.0.2-duskcut.2",
+    "recipeCommit": "5d8c014f29dfbdd3052a328ade0aac666ef649ce",
+    "lockSha256": "9d4102f98d7331738a1a21e0f0436959775426db908a7f563f4cf81633274d6f",
+    "binaryHashes": {
+      "ffmpeg.exe": "5f0b985505bde07a065cce221f6b3d43f93b7549c0ea54abc9acd5aa84992d1a",
+      "ffprobe.exe": "e129ce1bf47ed8331de1d9336735cdc80d4165405478c5f1a0ed482bd8f2a773"
+    },
+    "evidenceSha256": "b11391c009497a8f1a5f740aac51e55df97b896efb7684b0dae13726771a1c23"
+  },
+  "toolchain": {
+    "image": "ghcr.io/pascalghanimi/duskcut-ffmpeg-toolchain@sha256:e141e607136fafad34df5a62c50e28431e0c6d04877e7657c8c9c244371194be",
+    "imageId": "sha256:14459c1c82d3295532316a74b5922c30bf096a510cb2fea5d2d74c19910e73d4",
+    "compiler": "x86_64-w64-mingw32-gcc",
+    "compilerVersion": "x86_64-w64-mingw32-gcc (crosstool-NG 1.29.0.7_b1a94f6) 16.2.0"
+  },
+  "archives": [
+    {
+      "name": "libatomic.a",
+      "linkTraceFiles": [
+        {
+          "recordedPath": "/opt/ct-ng/lib/gcc/x86_64-w64-mingw32/16.2.0/../../../../x86_64-w64-mingw32/lib/../lib/libatomic.a",
+          "resolvedPath": "/opt/ct-ng/x86_64-w64-mingw32/sysroot/lib/libatomic.a",
+          "bytes": 77940,
+          "sha256": "fa0641db643e83ff29df31e6e0c13cdd76108ab3cd1e1977dc9617f4383d4c6c"
+        }
+      ],
+      "reportedPath": "/opt/ct-ng/lib/gcc/x86_64-w64-mingw32/16.2.0/../../../../x86_64-w64-mingw32/lib/../lib/libatomic.a",
+      "path": "/opt/ct-ng/x86_64-w64-mingw32/sysroot/lib/libatomic.a",
+      "bytes": 77940,
+      "sha256": "fa0641db643e83ff29df31e6e0c13cdd76108ab3cd1e1977dc9617f4383d4c6c",
+      "presentInBuildLinkTrace": true
+    },
+    {
+      "name": "libgomp.a",
+      "linkTraceFiles": [
+        {
+          "recordedPath": "/opt/ct-ng/lib/gcc/x86_64-w64-mingw32/16.2.0/../../../../x86_64-w64-mingw32/lib/../lib/libgomp.a",
+          "resolvedPath": "/opt/ct-ng/x86_64-w64-mingw32/sysroot/lib/libgomp.a",
+          "bytes": 474990,
+          "sha256": "87b45793807ac033978501a27bcbc3e2729c4164b37083f39b9391b48c73254c"
+        }
+      ],
+      "reportedPath": "/opt/ct-ng/lib/gcc/x86_64-w64-mingw32/16.2.0/../../../../x86_64-w64-mingw32/lib/../lib/libgomp.a",
+      "path": "/opt/ct-ng/x86_64-w64-mingw32/sysroot/lib/libgomp.a",
+      "bytes": 474990,
+      "sha256": "87b45793807ac033978501a27bcbc3e2729c4164b37083f39b9391b48c73254c",
+      "presentInBuildLinkTrace": true
+    },
+    {
+      "name": "libgcc.a",
+      "linkTraceFiles": [
+        {
+          "recordedPath": "/opt/ct-ng/lib/gcc/x86_64-w64-mingw32/16.2.0/libgcc.a",
+          "resolvedPath": "/opt/ct-ng/lib/gcc/x86_64-w64-mingw32/16.2.0/libgcc.a",
+          "bytes": 6933452,
+          "sha256": "627ab17dc8a8cad1f43c5c92e710c48c10ef2dbb08ea13f8196aacc28accbb70"
+        }
+      ],
+      "reportedPath": "/opt/ct-ng/lib/gcc/x86_64-w64-mingw32/16.2.0/libgcc.a",
+      "path": "/opt/ct-ng/lib/gcc/x86_64-w64-mingw32/16.2.0/libgcc.a",
+      "bytes": 6933452,
+      "sha256": "627ab17dc8a8cad1f43c5c92e710c48c10ef2dbb08ea13f8196aacc28accbb70",
+      "presentInBuildLinkTrace": true
+    },
+    {
+      "name": "libgcc_eh.a",
+      "linkTraceFiles": [
+        {
+          "recordedPath": "/opt/ct-ng/lib/gcc/x86_64-w64-mingw32/16.2.0/libgcc_eh.a",
+          "resolvedPath": "/opt/ct-ng/lib/gcc/x86_64-w64-mingw32/16.2.0/libgcc_eh.a",
+          "bytes": 57842,
+          "sha256": "68a01538bbba7a70e625f358a2172cf29ba054908c1dc4e3e78b59dc71d2db6f"
+        }
+      ],
+      "reportedPath": "/opt/ct-ng/lib/gcc/x86_64-w64-mingw32/16.2.0/libgcc_eh.a",
+      "path": "/opt/ct-ng/lib/gcc/x86_64-w64-mingw32/16.2.0/libgcc_eh.a",
+      "bytes": 57842,
+      "sha256": "68a01538bbba7a70e625f358a2172cf29ba054908c1dc4e3e78b59dc71d2db6f",
+      "presentInBuildLinkTrace": true
+    },
+    {
+      "name": "libstdc++.a",
+      "linkTraceFiles": [
+        {
+          "recordedPath": "/opt/ct-ng/lib/gcc/x86_64-w64-mingw32/16.2.0/../../../../x86_64-w64-mingw32/lib/../lib/libstdc++.a",
+          "resolvedPath": "/opt/ct-ng/x86_64-w64-mingw32/sysroot/lib/libstdc++.a",
+          "bytes": 8326308,
+          "sha256": "21786f24ebe6090420fb28862e3a949b75f9661f60a2f5b6b1a100b8c71b4ab0"
+        }
+      ],
+      "reportedPath": "/opt/ct-ng/lib/gcc/x86_64-w64-mingw32/16.2.0/../../../../x86_64-w64-mingw32/lib/../lib/libstdc++.a",
+      "path": "/opt/ct-ng/x86_64-w64-mingw32/sysroot/lib/libstdc++.a",
+      "bytes": 8326308,
+      "sha256": "21786f24ebe6090420fb28862e3a949b75f9661f60a2f5b6b1a100b8c71b4ab0",
+      "presentInBuildLinkTrace": true
+    }
+  ],
+  "inspection": {
+    "network": "none",
+    "imageFilesystem": "read-only",
+    "unprivilegedUid": 65534,
+    "mountedHostPaths": []
+  },
+  "scope": "Records exact runtime archives from the original pinned compiler image. Does not modify the original build, source lock, or binaries; is not a legal approval."
+}
