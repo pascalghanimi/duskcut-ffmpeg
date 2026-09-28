@@ -247,10 +247,22 @@ static int mf_set_input(AVCodecContext *avctx, const AVPacket *packet)
     SET_ATTR(IMFMediaType_SetGUID(type, &MF_MT_SUBTYPE, subtype));
     if (c->audio) {
         int rate = avctx->sample_rate, channels = avctx->ch_layout.nb_channels;
+        const uint8_t *extra = avctx->extradata;
+        size_t extra_size = avctx->extradata_size;
+        size_t packet_extra_size = 0;
+        const uint8_t *packet_extra = packet ? av_packet_get_side_data(packet,
+            AV_PKT_DATA_NEW_EXTRADATA, &packet_extra_size) : NULL;
         int payload = avctx->codec_id == AV_CODEC_ID_AAC_LATM ? 3 :
             (packet && packet->size >= 2 && packet->data[0] == 0xff &&
              (packet->data[1] & 0xf6) == 0xf0 ? 1 : 0);
         MPEG4AudioConfig config;
+        /* aac_adtstoasc only removes transport framing; Windows still decodes
+         * every compressed sample. ADTS stores its AudioSpecificConfig on the
+         * first output packet rather than in the container codec parameters. */
+        if (packet_extra && packet_extra_size) {
+            extra = packet_extra;
+            extra_size = packet_extra_size;
+        }
         if (payload == 1 && packet->size >= AV_AAC_ADTS_HEADER_SIZE) {
             AACADTSHeaderInfo header;
             if (ff_adts_header_parse_buf(packet->data, &header) < 0) {
@@ -261,9 +273,9 @@ static int mf_set_input(AVCodecContext *avctx, const AVPacket *packet)
             if (header.chan_config > 0 && header.chan_config < FF_ARRAY_ELEMS(ff_mpeg4audio_channels))
                 channels = ff_mpeg4audio_channels[header.chan_config];
         }
-        if (!payload && avctx->extradata_size > 0 &&
-            avpriv_mpeg4audio_get_config2(&config, avctx->extradata,
-                                        avctx->extradata_size, 1, avctx) >= 0) {
+        if (extra_size > 65536) { ret = AVERROR_INVALIDDATA; goto done; }
+        if (!payload && extra_size > 0 &&
+            avpriv_mpeg4audio_get_config2(&config, extra, extra_size, 1, avctx) >= 0) {
             rate = config.sample_rate;
             channels = config.channels;
         }
@@ -272,15 +284,14 @@ static int mf_set_input(AVCodecContext *avctx, const AVPacket *packet)
         if (rate > 0) SET_ATTR(IMFMediaType_SetUINT32(type, &MF_MT_AUDIO_SAMPLES_PER_SECOND, rate));
         if (channels > 0) SET_ATTR(IMFMediaType_SetUINT32(type, &MF_MT_AUDIO_NUM_CHANNELS, channels));
         SET_ATTR(IMFMediaType_SetUINT32(type, &MF_MT_AUDIO_BITS_PER_SAMPLE, 32));
-        if (!payload && avctx->extradata_size > 0) {
+        if (!payload && extra_size > 0) {
             uint8_t *user_data;
-            if (avctx->extradata_size > 65536) { ret = AVERROR_INVALIDDATA; goto done; }
-            user_data = av_mallocz(12 + avctx->extradata_size);
+            user_data = av_mallocz(12 + extra_size);
             if (!user_data) { ret = AVERROR(ENOMEM); goto done; }
             /* HEAACWAVEINFO after WAVEFORMATEX, followed by AudioSpecificConfig. */
             AV_WL16(user_data + 2, 0xfe);
-            memcpy(user_data + 12, avctx->extradata, avctx->extradata_size);
-            hr = IMFMediaType_SetBlob(type, &MF_MT_USER_DATA, user_data, 12 + avctx->extradata_size);
+            memcpy(user_data + 12, extra, extra_size);
+            hr = IMFMediaType_SetBlob(type, &MF_MT_USER_DATA, user_data, 12 + extra_size);
             av_free(user_data);
             if (FAILED(hr)) goto fail;
         }
@@ -600,7 +611,7 @@ const FFCodec ff_ ## NAME ## _mf_decoder = { \
     .p.wrapper_name = "mediafoundation", \
 };
 
-MF_DECODER(aac, AAC, AUDIO, NULL)
+MF_DECODER(aac, AAC, AUDIO, "aac_adtstoasc")
 MF_DECODER(aac_latm, AAC_LATM, AUDIO, NULL)
 MF_DECODER(h264, H264, VIDEO, "h264_mp4toannexb")
 MF_DECODER(hevc, HEVC, VIDEO, "hevc_mp4toannexb")

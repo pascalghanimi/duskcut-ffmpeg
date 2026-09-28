@@ -10,7 +10,7 @@ marker = 'aac_mf_encoder_deps="mediafoundation"'
 if contents.count(marker) != 1:
     raise SystemExit("Pinned FFmpeg configure layout changed")
 contents = contents.replace(marker, '''aac_mf_decoder_deps="mediafoundation"
-aac_mf_decoder_select="mpeg4audio adts_header"
+aac_mf_decoder_select="mpeg4audio adts_header aac_adtstoasc_bsf"
 aac_latm_mf_decoder_deps="mediafoundation"
 aac_latm_mf_decoder_select="mpeg4audio adts_header"
 h264_mf_decoder_deps="mediafoundation"
