@@ -24,6 +24,7 @@ cd ffmpeg-source
 export SOURCE_DATE_EPOCH="${fields[2]}"
 export TZ=UTC LC_ALL=C.UTF-8
 mkdir -p /work/configuration
+python3 /work/control/apply_windows_codecs.py /work/ffmpeg-source /work/control /work/configuration
 python3 /work/control/capture_environment.py > /work/configuration/build-environment.json
 "$CC" --version > /work/configuration/compiler-version.txt
 "$CXX" --version > /work/configuration/compiler-cxx-version.txt
@@ -60,10 +61,8 @@ PY
     --extra-version="${fields[4]}"
 cp config.h config_components.h config.asm /work/configuration/
 cp ffbuild/config.mak ffbuild/config.log /work/configuration/
-if grep -E '^#define CONFIG_LIBDVD(NAV|READ) 1$' config.h; then
-    echo 'DVD libraries unexpectedly enabled' >&2
-    exit 1
-fi
+python3 /work/control/verify_codec_profile.py /work/control/profile.json config.h config_components.h \
+    > /work/configuration/codec-policy-audit.json
 make -j"$(nproc)" V=1
 make install install-doc
 cp COPYING.GPLv3 /work/binary/LICENSE.txt

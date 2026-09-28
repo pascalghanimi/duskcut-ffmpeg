@@ -5,6 +5,7 @@ import { writeFile } from 'node:fs/promises'
 import { basename, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { hashFile, validateLock } from './validate-lock.mjs'
+import { validateSourceRelease } from './source-release.mjs'
 
 const [manifestArg, buildId] = process.argv.slice(2)
 if (!manifestArg || !buildId) throw new Error('Usage: node build/create-lock.mjs <unpacked-input-directory> <buildId>')
@@ -18,8 +19,9 @@ const supplement = JSON.parse(readFileSync(supplementFile, 'utf8'))
 const release = JSON.parse(readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../release-assets.json'), 'utf8'))
 const manifestSha256 = await hashFile(manifestFile)
 const supplementSha256 = await hashFile(supplementFile)
-if (release.releaseTag !== `sources-${buildId}` || manifestSha256 !== release.sourceManifestSha256 ||
-    supplementSha256 !== release.supplementalManifestSha256) throw new Error('released_source_manifest_integrity_mismatch')
+// A new wrapper/profile build can reuse exactly the same immutable upstream
+// inputs. Bind their release separately instead of pretending they were republished.
+validateSourceRelease(release, manifestSha256, supplementSha256)
 if (supplement.schemaVersion !== 1 || !Array.isArray(supplement.files) ||
     supplement.freetypeDlg?.id !== 'freetype-dlg' ||
     supplement.freetypeDlg.revision !== '395ccad2c1e0daae535c4d20bb0a3f2424648e17' ||
@@ -45,7 +47,7 @@ for (const notice of manifest.notices) {
   const id = `notice-${createHash('sha256').update(notice.file).digest('hex').slice(0, 20)}`
   noticeIds.set(notice.file, id)
   blobs.push({ id, role: 'license-evidence', file: sourcePrefix + notice.file, bytes: notice.bytes, sha256: notice.sha256,
-    origin: `https://github.com/pascalghanimi/duskcut-ffmpeg/releases/tag/sources-${buildId}` })
+    origin: `https://github.com/pascalghanimi/duskcut-ffmpeg/releases/tag/${release.releaseTag}` })
 }
 const requireFile = id => { const row = blobs.find(b => b.id === id); if (!row) throw new Error(`missing_manifest_entry:${id}`); return row }
 const mingwNotice = manifest.notices.find(n => n.component === '10-mingw' && /\/COPYING$/.test(n.file))
@@ -57,7 +59,7 @@ const runtime = (name, noticeId) => ({ name, version: manifest.toolchain.gccVers
   exclusion: { basis: 'gcc-runtime-library-exception', evidenceBlobId: review.id,
     rationale: 'Covered runtime source headers grant GCC Runtime Library Exception 3.1. The recorded build uses the ordinary GCC C/C++ toolchain without a proprietary intermediate-representation plugin; exact exception text and component evidence are retained.' } })
 const lock = {
-  schemaVersion: 2, target: 'win64', variant: 'gpl', addin: '9.0', buildId,
+  schemaVersion: 2, target: 'win64', variant: 'gpl', addin: '9.0', buildId, sourceReleaseTag: release.releaseTag,
   profile: { id: profile.id, sha256: await hashFile(profileFile) },
   recipe: { blobId: requireFile('btbn-build-recipe').id, revision: manifest.recipeRevision },
   ffmpeg: { blobId: requireFile('ffmpeg').id, revision: manifest.ffmpegRevision, sourceDateEpoch: 1790467200 },

@@ -149,3 +149,22 @@ test('dependency stages serialize without a circular link to combination/final s
   assert.ok(!fixed.includes('COPY --from=combine-layer /duskcut-control'))
   assert.ok(!fixed.includes('COPY --from=x264 /duskcut-control'))
 })
+test('Windows-only profile keeps the original source-release identity distinct', () => selectedFixture(async ({ lock, path, save }) => {
+  lock.buildId = '9.0.2-duskcut.2'
+  lock.profile.id = 'duskcut-win64-gpl-windows-codecs-v2'
+  lock.sourceReleaseTag = 'sources-9.0.2-duskcut.1'
+  await save()
+  assert.equal((await validateLock(path)).lock.sourceReleaseTag, 'sources-9.0.2-duskcut.1')
+  delete lock.sourceReleaseTag
+  await save()
+  await assert.rejects(validateLock(path), /missing_immutable_source_release/)
+}))
+test('Windows-only profile refuses x264 and x265 compile sources', () => selectedFixture(async ({ lock, path, save }) => {
+  lock.profile.id = 'duskcut-win64-gpl-windows-codecs-v2'
+  lock.sourceReleaseTag = 'sources-9.0.2-duskcut.1'
+  for (const name of ['50-x264', '50-x265']) {
+    lock.sourceCache.members[0].cacheName = `${name}_${'a'.repeat(64)}.tar.xz`
+    await save()
+    await assert.rejects(validateLock(path), /forbidden_bundled_codec_source/)
+  }
+}))

@@ -1,14 +1,18 @@
 # Controlled DuskCut FFmpeg build
 
-The `duskcut-win64-gpl-no-dvd-v1` profile builds Windows x64 static FFmpeg and
-ffprobe from fixed source inputs. It excludes DVD access/CSS decryption and the
-unused Rust/SVG/JXL/Vulkan dependency stacks. `profile.json` is the authoritative
-list of selected dependencies and FFmpeg flags. It retains DuskCut's local-media
-editing, subtitle/font rendering, audio processing, CPU video encoders and
-NVIDIA/Intel/AMD hardware integration. Hardware still requires suitable drivers.
+The `duskcut-win64-gpl-windows-codecs-v2` profile builds Windows x64 static FFmpeg
+and ffprobe from fixed source inputs. H.264, HEVC and AAC encode/decode use only
+Windows Media Foundation wrappers. It excludes native implementations, x264/x265,
+direct GPU codec encoders, ProRes, WMV/VC-1, DVD access/CSS decryption and the
+unused Rust/SVG/JXL/Vulkan dependency stacks. `profile.json` is authoritative.
+AV1/AVIF, VP8/VP9 (including alpha), MPEG-2, font rendering, Rubber Band pitch and
+vidstab stabilization remain. This is still a GPL build, not an LGPL conversion.
+Windows codecs must be installed and support the actual stream profile. HEVC can
+require the separately installed Windows extension; no native codec fallback is
+silently substituted. Hardware is used through Media Foundation where available.
 
 The build uses the BtbN recipe revision and base-win64 compiler image pinned in
-the source manifest. It rebuilds 41 selected source archives, including MinGW CRT
+the source manifest. It rebuilds 39 selected source archives, including MinGW CRT
 and winpthreads. All dependency and FFmpeg compilation runs with network access
 disabled. The oneVPL patch is an archived, hash-checked input, applied locally.
 The pinned FreeType snapshots omit their `dlg` git submodule. A separately
@@ -32,7 +36,7 @@ and 16 GB RAM. The compiler image contains Python and build tools.
 2. Create and validate the build lock:
 
    ```sh
-   node build/create-lock.mjs input-data 9.0.2-duskcut.1
+   node build/create-lock.mjs input-data 9.0.2-duskcut.2
    node build/validate-lock.mjs input-data/build-lock.json
    ```
 
@@ -48,6 +52,13 @@ and 16 GB RAM. The compiler image contains Python and build tools.
 The lock binds all selected sources and license evidence to their content hashes.
 It also binds the profile. The executed generated Dockerfile must select exactly
 the same cache members: missing or extra compile inputs stop the build.
+The binary build ID is separate from `sourceReleaseTag`: .2 reuses the exact
+hash-pinned `sources-9.0.2-duskcut.1` inputs and adds versioned local MF wrapper
+source from this repository. This does not claim the old inputs were republished.
+Before configure, `apply_windows_codecs.py` applies the reviewed adapter and
+records all five changed/added FFmpeg files in a unified diff and pre/post hash
+inventory. Configuration then fails if any forbidden implementation is enabled
+or any required Windows wrapper, retained format, or effect is missing.
 
 ## Outputs and traceability
 
@@ -59,6 +70,10 @@ the same cache members: missing or extra compile inputs stop the build.
   generated Dockerfile, compiler identity, dependency configuration, full build
   logs, FFmpeg configure logs and link inputs. Intermediate object trees are
   omitted; complete original sources are independently published inputs.
+- `work/configuration/windows-codecs.patch`, `windows-codecs-source.json`, and
+  `codec-policy-audit.json`: exact custom adapter source correspondence and the
+  actual generated codec configuration. Packaging verifies copied controls,
+  including `mfdec.c`, against the recorded Git commit and rechecks the inventory.
 
 The original BtbN recipe is preserved unchanged in the source inputs.
 `prepare_recipe.py` makes the selected-dependency and offline-patch changes and

@@ -37,7 +37,10 @@ export async function validateLock(lockFile) {
   if (!Number.isSafeInteger(lock.ffmpeg?.sourceDateEpoch) || lock.ffmpeg.sourceDateEpoch < 1) throw new Error('missing_source_date_epoch')
   if (typeof lock.toolchain?.image !== 'string' || !/^[a-z0-9./_-]+@sha256:[a-f0-9]{64}$/.test(lock.toolchain.image)) throw new Error('toolchain_image_not_digest_pinned')
   if (lock.schemaVersion === 1 && !sha.test(lock.downloadCache?.innerSha256)) throw new Error('inner_cache_not_content_pinned')
-  if (lock.schemaVersion === 2 && (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$/.test(lock.buildId || '') || !sha.test(lock.profile?.sha256) || lock.profile?.id !== 'duskcut-win64-gpl-no-dvd-v1')) throw new Error('invalid_build_identity_or_profile')
+  const windowsCodecs = lock.profile?.id === 'duskcut-win64-gpl-windows-codecs-v2'
+  if (lock.schemaVersion === 2 && (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$/.test(lock.buildId || '') || !sha.test(lock.profile?.sha256) ||
+      !['duskcut-win64-gpl-no-dvd-v1', 'duskcut-win64-gpl-windows-codecs-v2'].includes(lock.profile?.id))) throw new Error('invalid_build_identity_or_profile')
+  if (windowsCodecs && !/^sources-[a-z0-9][a-z0-9.-]{0,79}$/.test(lock.sourceReleaseTag || '')) throw new Error('missing_immutable_source_release')
   if (!Array.isArray(lock.blobs) || lock.blobs.length < 4) throw new Error('missing_inputs')
   const blobs = new Map()
   const seenPaths = new Set()
@@ -68,6 +71,7 @@ export async function validateLock(lockFile) {
     const caches = new Set()
     for (const member of lock.sourceCache.members) {
       if (!/^\d{2}-[a-z0-9-]+_[a-f0-9]{64}\.tar\.xz$/.test(member.cacheName || '') || /dvd|css|rav1e|rust|rsvg|jxl|lcevc|vulkan|placebo|whisper/.test(member.cacheName) || caches.has(member.cacheName)) throw new Error('invalid_duplicate_or_forbidden_cache_member')
+      if (windowsCodecs && /(?:^|-)x26[45]_/.test(member.cacheName)) throw new Error('forbidden_bundled_codec_source')
       caches.add(member.cacheName)
       requiredBlob(blobs, member.blobId, 'source-cache')
     }

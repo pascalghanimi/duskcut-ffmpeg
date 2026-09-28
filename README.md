@@ -11,11 +11,19 @@ provides the Windows tools and their matching corresponding-source archive.
 See [the review and its limits](docs/9.0.2-duskcut.1-review.md).
 This is a standalone FFmpeg component release, not a DuskCut editor installer.
 
-The selected build keeps the software codecs, audio/video filters, subtitle
+The .1 release keeps the software codecs, audio/video filters, subtitle
 support and hardware interfaces needed by DuskCut. It does not include DVD
 optical-disc navigation libraries or DVD CSS decryption, and does not ship ffplay.
 Ordinary DVD subtitle/MPEG formats and the DVD navigation data parser are not
 decryption and remain supported.
+
+The current development profile prepares `9.0.2-duskcut.2` with H.264, HEVC and
+AAC exclusively behind Windows Media Foundation, and removes ProRes and WMV/VC-1.
+AV1/AVIF, VP8/VP9, MPEG-2 and all existing Rubber Band/vidstab effects remain.
+This remains a GPL component. The .2 profile is **not a released or functionally
+approved replacement** until native/application tests and source review pass.
+Its custom Windows adapter, exact patch and build configuration are included in
+the corresponding-source process. See `build/README.md`.
 
 Build inputs are fixed by SHA-256 and source revision. Dependency compilation
 and FFmpeg compilation run with networking disabled. Build configuration,

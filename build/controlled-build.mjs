@@ -7,7 +7,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { hashFile, validateLock } from './validate-lock.mjs'
 
 const scripts = dirname(fileURLToPath(import.meta.url))
-const scriptNames = ['container-generate.sh', 'container-compile.sh', 'safe_extract.py', 'capture_environment.py', 'prepare_recipe.py', 'profile.json']
+export const scriptNames = ['container-generate.sh', 'container-compile.sh', 'safe_extract.py', 'capture_environment.py', 'prepare_recipe.py', 'profile.json',
+  'apply_windows_codecs.py', 'verify_codec_profile.py', 'windows-codecs/apply.py', 'windows-codecs/mfdec.c']
 export function publicImageRecord(info, reference) {
   if (!/^sha256:[a-f0-9]{64}$/.test(info?.Id || '')) throw new Error('invalid_image_identity')
   // Config.Env, Labels, History, author strings, private registry aliases,
@@ -126,7 +127,11 @@ export async function build(lockFile, outputRoot) {
     await copyFile(blob.path, dest)
     if (await hashFile(dest) !== blob.sha256) throw new Error(`copied_input_changed:${blob.id}`)
   }
-  for (const file of scriptNames) await copyFile(resolve(scripts, file), resolve(work, 'control', file))
+  for (const file of scriptNames) {
+    const destination = resolve(work, 'control', file)
+    await mkdir(dirname(destination), { recursive: true })
+    await copyFile(resolve(scripts, file), destination)
+  }
   await writeFile(resolve(work, 'control', 'lock.json'), JSON.stringify(checked.lock, null, 2) + '\n', { flag: 'wx' })
   await writeFile(resolve(work, 'toolchain-image.json'), JSON.stringify(publicImageRecord(image, checked.lock.toolchain.image), null, 2) + '\n', { flag: 'wx' })
   const versionInfo = JSON.parse(execFileSync('docker', ['version', '--format', '{{json .}}'], { encoding: 'utf8' }))

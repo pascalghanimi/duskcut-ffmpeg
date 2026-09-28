@@ -5,6 +5,7 @@ No executable is run and no release is published or approved by this helper.
 import argparse
 import hashlib
 import io
+import importlib.util
 import json
 import pathlib
 import posixpath
@@ -19,8 +20,11 @@ MAX_ASSET_BYTES = 2 ** 31 - 1
 MAX_RUNTIME_BYTES = 700 * 1024 ** 2
 MAX_TEXT_BYTES = 256 * 1024 ** 2
 DOCS = ('LICENSE', 'README.md', 'SOURCES.md', 'THIRD-PARTY-NOTICES.txt')
-CONTROLS = ('container-generate.sh', 'container-compile.sh', 'safe_extract.py',
-            'capture_environment.py', 'prepare_recipe.py', 'profile.json')
+LEGACY_CONTROLS = ('container-generate.sh', 'container-compile.sh', 'safe_extract.py',
+                   'capture_environment.py', 'prepare_recipe.py', 'profile.json')
+CONTROLS = LEGACY_CONTROLS + ('apply_windows_codecs.py', 'verify_codec_profile.py',
+                              'windows-codecs/apply.py', 'windows-codecs/mfdec.c')
+WINDOWS_CONFIGURATION = ('windows-codecs.patch', 'windows-codecs-source.json', 'codec-policy-audit.json')
 # These are produced unconditionally by the pinned container scripts and orchestrator.
 # A ZIP of executables plus an incomplete hand-selected log must not pass for build evidence.
 CONFIGURATION = (
@@ -163,7 +167,7 @@ def repository_snapshot(repository, revision):
                 or any(part in ('.git', 'node_modules', '__pycache__') for part in name.split('/'))
                 or name.endswith(('.exe', '.zip', '.tar', '.xz', '.gz', '.pyc'))
                 or not (pathlib.PurePosixPath(name).suffix.lower() in ('.md', '.txt', '.json', '.mjs', '.js', '.py', '.sh', '.yml', '.yaml')
-                        or name in ('LICENSE', '.gitattributes', '.gitignore'))):
+                        or name in ('LICENSE', '.gitattributes', '.gitignore', 'build/windows-codecs/mfdec.c'))):
             raise ValueError('Unexpected tracked build-recipe file: ' + name)
         data = subprocess.check_output(['git', '-C', str(repository), 'show', revision + ':' + name])
         audited_fixture = AUDITED_TEST_FIXTURES.get(name) == digest_bytes(data)
@@ -296,14 +300,19 @@ def verify_build(artifact, inputs, repository, version):
             raise ValueError('Build lock identity mismatch')
         if json.loads(member_bytes(evidence, members, 'work/control/lock.json')) != lock:
             raise ValueError('Executed control lock differs from input lock')
-        for control in CONTROLS:
+        profile = member_bytes(evidence, members, 'work/control/profile.json')
+        windows_profile = json.loads(profile).get('id') == 'duskcut-win64-gpl-windows-codecs-v2'
+        for control in CONTROLS if windows_profile else LEGACY_CONTROLS:
             if member_bytes(evidence, members, 'work/control/' + control) != snapshot.get('build/' + control):
                 raise ValueError('Executed build control differs from recorded commit: ' + control)
-        profile = member_bytes(evidence, members, 'work/control/profile.json')
         if digest_bytes(profile) != lock.get('profile', {}).get('sha256'):
             raise ValueError('Executed profile differs from locked profile')
         if member_bytes(evidence, members, 'work/configuration/profile.json') != profile:
             raise ValueError('Generated configuration profile differs from executed profile')
+        if windows_profile:
+            if lock.get('sourceReleaseTag') != json.loads(snapshot['release-assets.json']).get('releaseTag'):
+                raise ValueError('Windows codec build is not bound to its original source release')
+            verify_windows_codec_evidence(evidence, members, snapshot, profile)
         compiled = json.loads(member_bytes(evidence, members, 'work/compile-result.json'))
         if any(compiled.get(key) != result[key] for key in ('buildId', 'ffmpegRevision', 'recipeRevision')):
             raise ValueError('Compile-stage result differs from final build result')
@@ -318,6 +327,35 @@ def verify_build(artifact, inputs, repository, version):
         path = regular(inputs, row['file'])
         verify_identity(path, row['bytes'], row['sha256'])
     return result, revision, snapshot, binaries, evidence_path, manifest_path, supplemental_path, supplement
+
+
+def verify_windows_codec_evidence(evidence, members, snapshot, profile):
+    # Recheck the generated component inventory while assembling, not only the
+    # log's claim that configuration succeeded. No bundled native fallback allowed.
+    for name in WINDOWS_CONFIGURATION:
+        if not member_bytes(evidence, members, 'work/configuration/' + name):
+            raise ValueError('Missing Windows codec correspondence evidence: ' + name)
+    path = pathlib.Path(__file__).resolve().parent.parent / 'build/verify_codec_profile.py'
+    spec = importlib.util.spec_from_file_location('codec_profile', path)
+    verifier = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(verifier)
+    configs = {name: member_bytes(evidence, members, 'work/configuration/' + name)
+               for name in ('config.h', 'config_components.h')}
+    actual = verifier.verify(json.loads(profile), configs)
+    recorded = json.loads(member_bytes(evidence, members, 'work/configuration/codec-policy-audit.json'))
+    if actual != recorded:
+        raise ValueError('Recorded Windows codec inventory differs from actual configuration')
+    source = json.loads(member_bytes(evidence, members, 'work/configuration/windows-codecs-source.json'))
+    controls = {name: digest_bytes(snapshot['build/' + name])
+                for name in ('windows-codecs/apply.py', 'windows-codecs/mfdec.c')}
+    files = source.get('files', [])
+    if (source.get('schemaVersion') != 1 or source.get('controls') != controls
+            or len(files) != 5 or {row.get('file') for row in files} != {
+                'configure', 'libavcodec/Makefile', 'libavcodec/allcodecs.c', 'libavcodec/mf_utils.c', 'libavcodec/mfdec.c'}
+            or any(not HASH.fullmatch(str(row.get('afterSha256'))) for row in files)
+            or next(row for row in files if row['file'] == 'libavcodec/mfdec.c')['afterSha256']
+                != controls['windows-codecs/mfdec.c']):
+        raise ValueError('Applied Windows codec source differs from packaged controlled source')
 
 
 def verify_input_parts(inputs, manifest_path):

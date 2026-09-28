@@ -154,6 +154,37 @@ class Fixture:
         self.update_lock(lock)
         return supplement
 
+    def enable_windows_profile(self):
+        build = pathlib.Path(__file__).resolve().parent.parent / 'build'
+        profile = (build / 'profile.json').read_bytes()
+        self.controls['profile.json'] = profile
+        self.write(self.repo, 'build/profile.json', profile)
+        self.git('add', 'build/profile.json')
+        self.git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--quiet', '-m', 'Windows profile')
+        self.revision = self.git('rev-parse', 'HEAD').decode().strip()
+        self.write(self.artifact, 'BUILD-RECIPE-COMMIT.txt', (self.revision + '\n').encode())
+        self.evidence_files['work/control/profile.json'] = profile
+        self.evidence_files['work/configuration/profile.json'] = profile
+        spec = importlib.util.spec_from_file_location('codec_policy_test', build / 'verify_codec_profile.py')
+        policy = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(policy)
+        configs = {'config.h': b'#define CONFIG_MEDIAFOUNDATION 1\n',
+                   'config_components.h': ''.join('#define CONFIG_' + name + ' 1\n' for name in policy.REQUIRED).encode()}
+        for name, data in configs.items():
+            self.evidence_files['work/configuration/' + name] = data
+        self.evidence_files['work/configuration/codec-policy-audit.json'] = module.json_bytes(policy.verify(json.loads(profile), configs))
+        controls = {name: module.digest_bytes(self.controls[name]) for name in ('windows-codecs/apply.py', 'windows-codecs/mfdec.c')}
+        files = ['configure', 'libavcodec/Makefile', 'libavcodec/allcodecs.c', 'libavcodec/mf_utils.c', 'libavcodec/mfdec.c']
+        source = {'schemaVersion': 1, 'controls': controls, 'files': [
+            {'file': name, 'beforeSha256': 'a' * 64, 'afterSha256': controls['windows-codecs/mfdec.c'] if name.endswith('/mfdec.c') else 'b' * 64}
+            for name in files]}
+        self.evidence_files['work/configuration/windows-codecs-source.json'] = module.json_bytes(source)
+        self.evidence_files['work/configuration/windows-codecs.patch'] = b'Fixture exact source diff\n'
+        lock = json.loads(self.evidence_files['inputs/build-lock.json'])
+        lock['profile'] = {'id': json.loads(profile)['id'], 'sha256': module.digest_bytes(profile)}
+        lock['sourceReleaseTag'] = 'sources-test.1'
+        self.update_lock(lock)
+
     def add_runtime_review(self, link_path=None, archive_path=None):
         root = self.root / 'runtime-review'
         root.mkdir()
@@ -320,6 +351,54 @@ class ReleaseTests(unittest.TestCase):
         fixture.evidence_files['work/control/container-compile.sh'] = b'# different command\n'
         fixture.save_evidence()
         with self.assertRaisesRegex(ValueError, 'Executed build control differs'):
+            fixture.package()
+
+    def test_windows_adapter_c_source_and_configuration_are_in_corresponding_source(self):
+        fixture = self.fixture
+        fixture.enable_windows_profile()
+        fixture.package()
+        with tarfile.open(fixture.root / 'result/duskcut-ffmpeg-test.1-corresponding-source.tar') as archive:
+            self.assertEqual(archive.extractfile('recipe/build/windows-codecs/mfdec.c').read(),
+                             fixture.controls['windows-codecs/mfdec.c'])
+
+    def test_changed_windows_adapter_or_driver_is_rejected(self):
+        fixture = self.fixture
+        fixture.enable_windows_profile()
+        for name in ('windows-codecs/mfdec.c', 'windows-codecs/apply.py', 'apply_windows_codecs.py', 'verify_codec_profile.py'):
+            path = 'work/control/' + name
+            original = fixture.evidence_files[path]
+            fixture.evidence_files[path] = b'altered source\n'
+            fixture.save_evidence()
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, 'Executed build control differs'):
+                fixture.package()
+            fixture.evidence_files[path] = original
+
+    def test_native_codec_enabled_after_configuration_cannot_pass_release(self):
+        fixture = self.fixture
+        fixture.enable_windows_profile()
+        fixture.evidence_files['work/configuration/config_components.h'] += b'#define CONFIG_HEVC_DECODER 1\n'
+        fixture.save_evidence()
+        with self.assertRaisesRegex(ValueError, 'Forbidden bundled'):
+            fixture.package()
+
+    def test_windows_source_record_must_match_actual_packaged_adapter(self):
+        fixture = self.fixture
+        fixture.enable_windows_profile()
+        name = 'work/configuration/windows-codecs-source.json'
+        source = json.loads(fixture.evidence_files[name])
+        source['files'][-1]['afterSha256'] = '0' * 64
+        fixture.evidence_files[name] = module.json_bytes(source)
+        fixture.save_evidence()
+        with self.assertRaisesRegex(ValueError, 'Applied Windows codec source differs'):
+            fixture.package()
+
+    def test_windows_profile_cannot_relabel_original_source_release(self):
+        fixture = self.fixture
+        fixture.enable_windows_profile()
+        lock = json.loads(fixture.evidence_files['inputs/build-lock.json'])
+        lock['sourceReleaseTag'] = 'sources-test.2'
+        fixture.update_lock(lock)
+        with self.assertRaisesRegex(ValueError, 'original source release'):
             fixture.package()
 
     def test_missing_or_empty_configuration_and_build_records_rejected(self):
