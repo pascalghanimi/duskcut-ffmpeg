@@ -36,6 +36,7 @@ const fixtures = [
 ]
 const results = []
 for (const f of fixtures) {
+  if (process.argv[5] && !process.argv[5].split(',').includes(f.name)) continue
   const path = resolve(root, f.name + (f.adts ? '.aac' : '.mp4'))
   if (!existsSync(path)) {
     const args = f.video

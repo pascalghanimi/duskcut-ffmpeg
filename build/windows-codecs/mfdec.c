@@ -37,6 +37,9 @@ typedef struct MFDecodeContext {
     DWORD input_id, output_id;
     MFT_OUTPUT_STREAM_INFO output_info;
     AVPacket *packet;
+    AVCodecParserContext *parser;
+    AVCodecContext *parser_context;
+    enum AVPixelFormat source_format;
     AVPacket *properties[512];
     int property_count;
     int audio, draining, eof, failed, configured, discontinuity;
@@ -170,7 +173,7 @@ static int mf_choose_output(AVCodecContext *avctx)
     int pass;
     /* Prefer float audio and the source bit depth. A 10-bit source is never
      * silently negotiated to NV12; colour conversion remains FFmpeg's job. */
-    const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(avctx->pix_fmt);
+    const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(c->source_format);
     int ten_bit = (desc && desc->comp[0].depth > 8) ||
         (avctx->codec_id == AV_CODEC_ID_HEVC && avctx->profile == 2);
     for (pass = 0; pass < (c->audio ? 2 : 1); pass++) {
@@ -210,6 +213,32 @@ static int mf_set_input(AVCodecContext *avctx, const AVPacket *packet)
         ? &MFAudioFormat_AAC : ff_codec_to_mf_subtype(avctx->codec_id);
     HRESULT hr;
     int ret = 0;
+
+    if (!c->audio && c->parser && packet) {
+        uint8_t *parsed;
+        int parsed_size;
+        const AVPixFmtDescriptor *desc;
+        /* The decoder input BSF already converted the packet to Annex B.
+         * Use a separate header-only parser context without the original avcC/
+         * hvcC extradata so the parser does not mistake it for length prefixes.
+         * MOV demuxing alone does not populate profile/bit depth reliably. */
+        av_parser_parse2(c->parser, c->parser_context, &parsed, &parsed_size,
+                          packet->data, packet->size, packet->pts, packet->dts, packet->pos);
+        if (c->parser->format >= 0) c->source_format = c->parser->format;
+        if (c->parser_context->profile >= 0) avctx->profile = c->parser_context->profile;
+        if (c->parser_context->level >= 0) avctx->level = c->parser_context->level;
+        if (c->parser->width > 0 && c->parser->height > 0) {
+            avctx->width = c->parser->width;
+            avctx->height = c->parser->height;
+        }
+        desc = av_pix_fmt_desc_get(c->source_format);
+        if (desc && (desc->comp[0].depth > (avctx->codec_id == AV_CODEC_ID_H264 ? 8 : 10) ||
+                     desc->log2_chroma_w != 1 || desc->log2_chroma_h != 1 || desc->nb_components != 3)) {
+            av_log(avctx, AV_LOG_ERROR, "DUSKCUT_MF_PROFILE_UNSUPPORTED: Windows decoder does not support this source bit depth or chroma format.\n");
+            c->failed = 1;
+            return AVERROR(ENOSYS);
+        }
+    }
 
 #define SET_ATTR(call) do { hr = (call); if (FAILED(hr)) goto fail; } while (0)
     SET_ATTR(c->functions.MFCreateMediaType(&type));
@@ -328,6 +357,8 @@ static int mf_copy_sample(AVCodecContext *avctx, IMFSample *sample, AVFrame *fra
         avctx->pix_fmt = c->pixel_format;
         ret = ff_set_dimensions(avctx, c->width, c->height);
         if (ret < 0) goto done;
+        avctx->width = c->width - c->crop_left - c->crop_right;
+        avctx->height = c->height - c->crop_top - c->crop_bottom;
         frame->format = c->pixel_format;
         frame->width = c->width;
         frame->height = c->height;
@@ -457,9 +488,9 @@ static int mf_receive_frame(AVCodecContext *avctx, AVFrame *frame)
             if (hr == MF_E_NOTACCEPTING) return AVERROR(EAGAIN);
             if (FAILED(hr)) return mf_error(avctx, "compressed sample input", hr);
             ret = mf_save_properties(c, c->packet);
-            if (ret < 0) return ret;
             c->discontinuity = 0;
             av_packet_unref(c->packet);
+            if (ret < 0) { c->failed = 1; return ret; }
         }
     }
 }
@@ -485,6 +516,8 @@ static av_cold int mf_close_decoder(AVCodecContext *avctx)
         ff_free_mf(&c->functions, &c->mft);
     }
     av_packet_free(&c->packet);
+    av_parser_close(c->parser);
+    avcodec_free_context(&c->parser_context);
     mf_clear_properties(c);
 #if !HAVE_UWP
     if (c->library) dlclose(c->library);
@@ -503,6 +536,15 @@ static av_cold int mf_init_decoder(AVCodecContext *avctx)
     int ret;
     if (!subtype) return AVERROR(ENOSYS);
     c->audio = avctx->codec_type == AVMEDIA_TYPE_AUDIO;
+    c->source_format = avctx->pix_fmt;
+    if (!c->audio) {
+        c->parser = av_parser_init(avctx->codec_id);
+        c->parser_context = avcodec_alloc_context3(NULL);
+        if (!c->parser || !c->parser_context) return AVERROR(ENOMEM);
+        c->parser_context->codec_id = avctx->codec_id;
+        c->parser_context->codec_type = AVMEDIA_TYPE_VIDEO;
+        c->parser->flags |= PARSER_FLAG_COMPLETE_FRAMES;
+    }
     c->discontinuity = 1;
     c->packet = av_packet_alloc();
     if (!c->packet) return AVERROR(ENOMEM);
@@ -513,7 +555,8 @@ static av_cold int mf_init_decoder(AVCodecContext *avctx)
         return AVERROR(ENOSYS);
     }
 #define LOAD(name) do { c->functions.name = (void *)dlsym(c->library, #name); \
-    if (!c->functions.name) return AVERROR(ENOSYS); } while (0)
+    if (!c->functions.name) { av_log(avctx, AV_LOG_ERROR, "DUSKCUT_MF_UNAVAILABLE: Missing Windows Media Foundation entry point " #name "\n"); \
+        return AVERROR(ENOSYS); } } while (0)
 #else
 #define LOAD(name) c->functions.name = name
 #endif
