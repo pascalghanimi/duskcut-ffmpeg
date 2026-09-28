@@ -1,0 +1,40 @@
+name: Windows system codec integration prototype
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Fetch fixed FFmpeg source
+        run: |
+          curl --fail --location --retry 3 https://codeload.github.com/FFmpeg/FFmpeg/tar.gz/c867e135494d97b27158d17837d254bbbb8d4f7b -o ffmpeg.tar.gz
+          echo '33a4c3d2a73e120db3bd6f1032d40d2f197768207537234e48d596457763f4b6  ffmpeg.tar.gz' | sha256sum --check
+          python3 build/safe_extract.py ffmpeg.tar.gz source
+          python3 build/windows-codecs/apply.py source/FFmpeg-c867e135494d97b27158d17837d254bbbb8d4f7b
+      - name: Pull pinned Windows cross compiler
+        run: docker pull ghcr.io/btbn/ffmpeg-builds/base-win64@sha256:ca6aaa981df5fe20d341f2f7e681875266adddabe117add1367765471d7d30ea
+      - name: Build isolated prototype without external codec implementations
+        run: |
+          docker run --rm --network=none --cap-drop=ALL --security-opt=no-new-privileges \
+            --user "$(id -u):$(id -g)" --env HOME=/tmp \
+            --mount type=bind,src="$PWD",dst=/work --workdir /work \
+            ghcr.io/btbn/ffmpeg-builds/base-win64@sha256:ca6aaa981df5fe20d341f2f7e681875266adddabe117add1367765471d7d30ea \
+            bash build/windows-codecs/prototype.sh
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        if: always()
+        with:
+          name: windows-codec-prototype-${{ github.run_id }}
+          path: |
+            prototype-out/
+            source/FFmpeg-*/ffbuild/config.log
+          if-no-files-found: error
+          retention-days: 14
