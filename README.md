@@ -17,12 +17,14 @@ optical-disc navigation libraries or DVD CSS decryption, and does not ship ffpla
 Ordinary DVD subtitle/MPEG formats and the DVD navigation data parser are not
 decryption and remain supported.
 
-The current development profile prepares `9.0.2-duskcut.3` with H.264 and AAC
+The current Windows-codec component is `9.0.2-duskcut.3`, with H.264 and AAC
 encode/decode and HEVC decode exclusively behind Windows Media Foundation; HEVC
 encoding is disabled. It also removes ProRes and WMV/VC-1.
 AV1/AVIF, VP8/VP9, MPEG-2 and all existing Rubber Band/vidstab effects remain.
-This remains a GPL component. The .3 profile is **not a released or functionally
-approved replacement** until native/application tests and source review pass.
+This remains a GPL component. Its exact source/runtime review and the bounded
+native/application tests are recorded in [the .3 review](docs/9.0.2-duskcut.3-review.md).
+HEVC playback on an extension-enabled account and a new signed editor installer
+are not established by that review.
 Its custom Windows adapter, exact patch and build configuration are included in
 the corresponding-source process. See `build/README.md`.
 
