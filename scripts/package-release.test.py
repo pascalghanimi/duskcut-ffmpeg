@@ -175,7 +175,8 @@ class Fixture:
         self.evidence_files['work/configuration/codec-policy-audit.json'] = module.json_bytes(policy.verify(json.loads(profile), configs))
         controls = {name: module.digest_bytes(self.controls[name]) for name in ('windows-codecs/apply.py', 'windows-codecs/mfdec.c')}
         files = ['configure', 'libavcodec/Makefile', 'libavcodec/allcodecs.c', 'libavcodec/mf_utils.c',
-                 'libavcodec/h264_parser.c', 'libavcodec/hevc/parser.c', 'libavcodec/mfdec.c']
+                 'libavcodec/h264_parser.c', 'libavcodec/hevc/parser.c', 'libavcodec/bsf/h264_mp4toannexb.c',
+                 'libavcodec/mfdec.c']
         source = {'schemaVersion': 1, 'controls': controls, 'files': [
             {'file': name, 'beforeSha256': 'a' * 64, 'afterSha256': controls['windows-codecs/mfdec.c'] if name.endswith('/mfdec.c') else 'b' * 64}
             for name in files]}
@@ -392,6 +393,22 @@ class ReleaseTests(unittest.TestCase):
         fixture.save_evidence()
         with self.assertRaisesRegex(ValueError, 'Applied Windows codec source differs'):
             fixture.package()
+
+    def test_windows_source_record_without_bitstream_filter_patch_cannot_pass_release(self):
+        # A build that recorded only the earlier seven files (no h264_mp4toannexb change)
+        # must not be packaged, nor one that lists a file twice to reach the count.
+        fixture = self.fixture
+        fixture.enable_windows_profile()
+        name = 'work/configuration/windows-codecs-source.json'
+        complete = json.loads(fixture.evidence_files[name])
+        kept = [row for row in complete['files'] if row['file'] != 'libavcodec/bsf/h264_mp4toannexb.c']
+        self.assertEqual(len(kept), 7)
+        for files in (kept, kept[:1] + kept):
+            with self.subTest(count=len(files)):
+                fixture.evidence_files[name] = module.json_bytes({**complete, 'files': files})
+                fixture.save_evidence()
+                with self.assertRaisesRegex(ValueError, 'Applied Windows codec source differs'):
+                    fixture.package()
 
     def test_windows_profile_cannot_relabel_original_source_release(self):
         fixture = self.fixture

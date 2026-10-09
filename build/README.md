@@ -42,7 +42,7 @@ and 16 GB RAM. The compiler image contains Python and build tools.
 2. Create and validate the build lock:
 
    ```sh
-   node build/create-lock.mjs input-data 9.0.2-duskcut.3
+   node build/create-lock.mjs input-data 9.0.2-duskcut.4
    node build/validate-lock.mjs input-data/build-lock.json
    ```
 
@@ -59,12 +59,20 @@ and 16 GB RAM. The compiler image contains Python and build tools.
 The lock binds all selected sources and license evidence to their content hashes.
 It also binds the profile. The executed generated Dockerfile must select exactly
 the same cache members: missing or extra compile inputs stop the build.
-The binary build ID is separate from `sourceReleaseTag`: .3 reuses the exact
+The binary build ID is separate from `sourceReleaseTag`: .4 reuses the exact
 hash-pinned `sources-9.0.2-duskcut.1` inputs and adds versioned local MF wrapper
 source from this repository. This does not claim the old inputs were republished.
+The completed .3 controlled build predates the H.264 seek fix below. It is
+superseded by .4 and must not be packaged; packaging from this revision
+rejects its source record, which lacks the `h264_mp4toannexb` change.
 Before configure, `apply_windows_codecs.py` applies the reviewed adapter and
-records all five changed/added FFmpeg files in a unified diff and pre/post hash
-inventory. Configuration then fails if any forbidden implementation is enabled
+records all eight changed/added FFmpeg files in a unified diff and pre/post hash
+inventory; an unchanged file stops the build. The `h264_mp4toannexb` bitstream
+filter gains the opt-in option `resume_ps` (default off, set only by `h264_mf`):
+it supplies the current SPS/PPS to the Windows decoder once, before the first
+picture after start, flush or a parameter-set change, when that picture carries
+none. Stream copy and remux behaviour is unchanged.
+Configuration then fails if any forbidden implementation is enabled
 or any required Windows wrapper, retained format, or effect is missing.
 
 ## Outputs and traceability
@@ -72,7 +80,8 @@ or any required Windows wrapper, retained format, or effect is missing.
 - `out/work/binary/bin/ffmpeg.exe` and `ffprobe.exe`: unsigned built executables.
 - `out/BUILD-RESULT.json`: build identity, input lock, source revisions and binary
   SHA-256 hashes. Status remains `built-not-approved-for-distribution` until the
-  independent native/application and publication gates pass.
+  independent native/application (see Native Windows tests) and publication
+  gates pass.
 - `out/ffmpeg-build-evidence.tar.xz`: executed scripts, profile, exact recipe diff,
   generated Dockerfile, compiler identity, dependency configuration, full build
   logs, FFmpeg configure logs and link inputs. Intermediate object trees are
@@ -131,6 +140,30 @@ After the controlled build has completed successfully:
    observed from **both** executables. Packaging independently verifies runtime
    evidence against that build before producing a new draft. Functional testing,
    review and publication remain separate steps.
+
+## Native Windows tests
+
+Run on Windows against the built `ffmpeg.exe` (candidate) and a reference
+`ffmpeg.exe` with native decoders and libx264/libx265, which create the synthetic
+fixtures. The reference is a QA tool, never shipped or used as a fallback. Each
+script writes a results file and exits non-zero on failure.
+
+- `node build/windows-codecs/test-color.mjs reference.exe candidate.exe output-directory`
+  writes `color-results.json`.
+- `node build/windows-codecs/test-dynamic-video.mjs reference.exe candidate.exe color-fixture-directory`
+  reuses the fixtures test-color.mjs created in that directory and writes
+  `dynamic-results.json`.
+- `node build/windows-codecs/test-runtime.mjs reference.exe candidate.exe new-output-dir [fixture,names]`
+  writes `results.json`; the optional list limits the run to those fixtures.
+- `node build/windows-codecs/test-cut-timing.mjs reference.exe candidate.exe NEW-output-directory [--rotation]`
+  writes `cut-timing-results.json`.
+- `node build/windows-codecs/test-recovery-seek.mjs reference.exe candidate.exe NEW-output-dir [released.exe]`
+  is Windows only, and its reference must include libx264 and libx265. Pass the
+  previous released Media Foundation build's `ffmpeg.exe` (the defects were
+  measured on `9.0.2-duskcut.2`) as the optional fourth argument to prove the
+  suite still detects the seek defects: every defect row must fail on it and
+  every control row pass. The run passes only with `"passed": true` in
+  `recovery-seek-results.json`.
 
 This pipeline addresses future controlled builds. It does not establish source
 completeness for older Gyan releases, automatically resolve codec patent rights,

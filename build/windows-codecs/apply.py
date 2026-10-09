@@ -107,3 +107,83 @@ replace_once('''    IMFSample_AddBuffer(sample, buffer);
     }
     return sample;''')
 utility.write_text(contents)
+
+# The MP4-to-Annex-B filter prepends SPS/PPS only to IDR pictures. After a seek
+# onto an H.264 recovery point (a non-IDR keyframe: open-GOP x264, YouTube) the
+# Windows decoder therefore received no parameter sets and returned nothing
+# until the next IDR. Only this filter knows the CURRENT parameter sets (it
+# refreshes them from new sample descriptions and in-band units), so it hands
+# them over once: before the first picture after start, flush or a change,
+# whatever that picture is. Windows keeps them from then on. Opt-in option,
+# set only by h264_mf: stream copies and remuxes are unchanged.
+annexb = root / "libavcodec/bsf/h264_mp4toannexb.c"
+contents = annexb.read_text()
+def replace_once(old, new):
+    global contents
+    if contents.count(old) != 1:
+        raise SystemExit("Pinned h264_mp4toannexb layout changed")
+    contents = contents.replace(old, new)
+replace_once('''#include "libavutil/mem.h"
+''', '''#include "libavutil/mem.h"
+#include "libavutil/opt.h"
+''')
+replace_once('''typedef struct H264BSFContext {
+    uint8_t *sps;''', '''typedef struct H264BSFContext {
+    const AVClass *class;
+    int      resume_ps;
+    int      ps_pending;
+    uint8_t *sps;''')
+replace_once('''    s->extradata_parsed = 1;
+''', '''    s->extradata_parsed = 1;
+    s->ps_pending       = 1;
+''')
+replace_once('''    s->new_idr      = s->extradata_parsed;
+''', '''    s->new_idr      = s->extradata_parsed;
+    s->ps_pending   = s->extradata_parsed;
+''')
+replace_once('''    uint8_t unit_type, new_idr, sps_seen, pps_seen;''',
+             '''    uint8_t unit_type, new_idr, sps_seen, pps_seen, ps_pending;''')
+replace_once('''        new_idr  = s->new_idr;''', '''        new_idr  = s->new_idr;
+        ps_pending = s->ps_pending;''')
+replace_once('''            count_or_copy(&out, &out_size, buf, nal_size, ps, j);''', '''            /* resume_ps: the first picture after start, flush or a parameter
+             * set change gets the current SPS/PPS if it lacks them, whatever its
+             * type (recovery point, unflagged I-frame, intra refresh). An IDR
+             * picture keeps the rule above. */
+            if (ps_pending && (unit_type == H264_NAL_SLICE || unit_type == H264_NAL_IDR_SLICE)) {
+                if (s->resume_ps && unit_type == H264_NAL_SLICE) {
+                    if (!sps_seen && !pps_seen) {
+                        if (s->sps_size)
+                            count_or_copy(&out, &out_size, s->sps, s->sps_size, PS_OUT_OF_BAND, j);
+                        if (s->pps_size)
+                            count_or_copy(&out, &out_size, s->pps, s->pps_size, PS_OUT_OF_BAND, j);
+                    } else if (sps_seen && !pps_seen && s->pps_size) {
+                        count_or_copy(&out, &out_size, s->pps, s->pps_size, PS_OUT_OF_BAND, j);
+                    }
+                }
+                ps_pending = 0;
+            }
+            count_or_copy(&out, &out_size, buf, nal_size, ps, j);''')
+replace_once('''    s->new_idr      = new_idr;
+    s->idr_sps_seen = sps_seen;''', '''    s->new_idr      = new_idr;
+    s->ps_pending   = ps_pending;
+    s->idr_sps_seen = sps_seen;''')
+replace_once('''const FFBitStreamFilter ff_h264_mp4toannexb_bsf = {
+    .p.name         = "h264_mp4toannexb",''', '''#define OFFSET(x) offsetof(H264BSFContext, x)
+static const AVOption h264_mp4toannexb_options[] = {
+    { "resume_ps", "insert the current SPS/PPS before the first picture after start, flush or a parameter set change when it carries none",
+      OFFSET(resume_ps), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1,
+      AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_BSF_PARAM },
+    { NULL },
+};
+
+static const AVClass h264_mp4toannexb_class = {
+    .class_name = "h264_mp4toannexb",
+    .item_name  = av_default_item_name,
+    .option     = h264_mp4toannexb_options,
+    .version    = LIBAVUTIL_VERSION_INT,
+};
+
+const FFBitStreamFilter ff_h264_mp4toannexb_bsf = {
+    .p.name         = "h264_mp4toannexb",
+    .p.priv_class   = &h264_mp4toannexb_class,''')
+annexb.write_text(contents)

@@ -7,21 +7,28 @@ import subprocess
 import sys
 
 
+# The adapter is the only file the patch adds. It stays last: its presence marks
+# an already-patched tree, and the large new file ends the recorded diff.
+ADAPTER = "libavcodec/mfdec.c"
+# Every FFmpeg file windows-codecs/apply.py changes or adds. Each must actually
+# change, and each is recorded in the patch and hash inventory below.
 SOURCE_FILES = ("configure", "libavcodec/Makefile", "libavcodec/allcodecs.c", "libavcodec/mf_utils.c",
-                "libavcodec/h264_parser.c", "libavcodec/hevc/parser.c", "libavcodec/mfdec.c")
+                "libavcodec/h264_parser.c", "libavcodec/hevc/parser.c", "libavcodec/bsf/h264_mp4toannexb.c",
+                ADAPTER)
 
 
 def apply(source, controls, evidence):
     source, controls, evidence = map(pathlib.Path, (source, controls, evidence))
-    if (source / SOURCE_FILES[-1]).exists():
+    if (source / ADAPTER).exists():
         raise ValueError("MF adapter source already exists; do not patch twice")
     before = {name: (source / name).read_bytes() if (source / name).exists() else b"" for name in SOURCE_FILES}
     subprocess.run([sys.executable, str(controls / "windows-codecs/apply.py"), str(source)], check=True)
     after = {name: (source / name).read_bytes() for name in SOURCE_FILES}
-    if after["libavcodec/mfdec.c"] != (controls / "windows-codecs/mfdec.c").read_bytes():
+    if after[ADAPTER] != (controls / "windows-codecs/mfdec.c").read_bytes():
         raise ValueError("Applied MF adapter does not match controlled source")
-    if any(before[name] == after[name] for name in SOURCE_FILES):
-        raise ValueError("Expected MF source patch was not applied")
+    unchanged = [name for name in SOURCE_FILES if before[name] == after[name]]
+    if unchanged:
+        raise ValueError("Expected MF source patch was not applied: " + ", ".join(unchanged))
     evidence.mkdir(parents=True, exist_ok=True)
     patch = "".join("".join(difflib.unified_diff(
         before[name].decode().splitlines(keepends=True), after[name].decode().splitlines(keepends=True),

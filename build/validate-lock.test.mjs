@@ -150,7 +150,7 @@ test('dependency stages serialize without a circular link to combination/final s
   assert.ok(!fixed.includes('COPY --from=x264 /duskcut-control'))
 })
 test('Windows-only profile keeps the original source-release identity distinct', () => selectedFixture(async ({ lock, path, save }) => {
-  lock.buildId = '9.0.2-duskcut.3'
+  lock.buildId = '9.0.2-duskcut.4'
   lock.profile.id = 'duskcut-win64-gpl-windows-codecs-v3'
   lock.sourceReleaseTag = 'sources-9.0.2-duskcut.1'
   await save()

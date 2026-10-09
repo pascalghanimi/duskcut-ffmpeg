@@ -25,6 +25,11 @@ LEGACY_CONTROLS = ('container-generate.sh', 'container-compile.sh', 'safe_extrac
 CONTROLS = LEGACY_CONTROLS + ('apply_windows_codecs.py', 'verify_codec_profile.py',
                               'windows-codecs/apply.py', 'windows-codecs/mfdec.c')
 WINDOWS_CONFIGURATION = ('windows-codecs.patch', 'windows-codecs-source.json', 'codec-policy-audit.json')
+# Exactly the FFmpeg files the reviewed Windows codec patch changes or adds. Kept
+# independent of build/apply_windows_codecs.py so a dropped file cannot pass both.
+WINDOWS_PATCHED_SOURCES = ('configure', 'libavcodec/Makefile', 'libavcodec/allcodecs.c', 'libavcodec/mf_utils.c',
+                           'libavcodec/h264_parser.c', 'libavcodec/hevc/parser.c',
+                           'libavcodec/bsf/h264_mp4toannexb.c', 'libavcodec/mfdec.c')
 # These are produced unconditionally by the pinned container scripts and orchestrator.
 # A ZIP of executables plus an incomplete hand-selected log must not pass for build evidence.
 CONFIGURATION = (
@@ -350,9 +355,8 @@ def verify_windows_codec_evidence(evidence, members, snapshot, profile):
                 for name in ('windows-codecs/apply.py', 'windows-codecs/mfdec.c')}
     files = source.get('files', [])
     if (source.get('schemaVersion') != 1 or source.get('controls') != controls
-            or len(files) != 7 or {row.get('file') for row in files} != {
-                'configure', 'libavcodec/Makefile', 'libavcodec/allcodecs.c', 'libavcodec/mf_utils.c',
-                'libavcodec/h264_parser.c', 'libavcodec/hevc/parser.c', 'libavcodec/mfdec.c'}
+            or len(files) != len(WINDOWS_PATCHED_SOURCES)
+            or {row.get('file') for row in files} != set(WINDOWS_PATCHED_SOURCES)
             or any(not HASH.fullmatch(str(row.get('afterSha256'))) for row in files)
             or next(row for row in files if row['file'] == 'libavcodec/mfdec.c')['afterSha256']
                 != controls['windows-codecs/mfdec.c']):

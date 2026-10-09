@@ -22,6 +22,7 @@
 #include "internal.h"
 #include "adts_header.h"
 #include "mpeg4audio.h"
+#include "golomb.h"
 #include "compat/w32dlfcn.h"
 #include "libavutil/channel_layout.h"
 #include "libavutil/imgutils.h"
@@ -30,6 +31,9 @@
 #include "libavutil/pixdesc.h"
 
 #define MF_TIME_BASE ((AVRational){ 1, 10000000 })
+/* Longest run of leading non-keyframe packets dropped after open/flush: about
+ * ten seconds of 60 fps, far beyond any keyframe interval seen in practice. */
+#define MF_MAX_SKIP_BEFORE_KEYFRAME 600
 
 typedef struct MFDecodeContext {
     HMODULE library;
@@ -41,6 +45,24 @@ typedef struct MFDecodeContext {
     AVCodecParserContext *parser;
     AVCodecContext *parser_context;
     enum AVPixelFormat source_format;
+    /* source_format was read from a parsed sequence header. Until then it is
+     * only the probe's guess, often the Windows OUTPUT format (NV12), which
+     * must never be compared with a real header as if the stream changed. */
+    int header_format_known;
+    /* An Annex B source's parameter sets (H.264 SPS/PPS, HEVC VPS/SPS/PPS)
+     * from its extradata. A transport stream need not repeat them at every
+     * keyframe, so after opening or flushing at an H.264 recovery point (a
+     * non-IDR keyframe) neither Windows nor the header parser saw one. */
+    uint8_t *parameter_sets;
+    int parameter_sets_size;
+    int need_parameter_sets;
+    /* Video packets before the first random access point after open/flush
+     * are not fed (see mf_can_start_decoding). */
+    int await_keyframe, skipped_before_keyframe;
+    /* The header parser has seen parameter sets, so its HEVC slice type is real. */
+    int parameter_sets_seen;
+    /* Pictures still to discard after starting on a gradual refresh point. */
+    int drop_outputs;
     AVPacket *properties[512];
     int property_count;
     int audio, draining, eof, failed, configured, discontinuity;
@@ -420,6 +442,164 @@ static int mf_latm_config(AVCodecContext *avctx, const AVPacket *packet, MPEG4Au
     return ff_mpeg4audio_get_config_gb(config, &gb, 0, avctx);
 }
 
+/* Does this Annex B buffer carry a sequence parameter set? Only NAL headers are
+ * inspected; no slice data is parsed. */
+static int mf_has_sequence_header(enum AVCodecID id, const uint8_t *data, int size)
+{
+    for (int i = 0; i + 3 < size; i++) {
+        if (data[i] || data[i + 1] || data[i + 2] != 1) continue;
+        if (id == AV_CODEC_ID_H264 ? (data[i + 3] & 0x1f) == 7 : ((data[i + 3] >> 1) & 0x3f) == 33)
+            return 1;
+        i += 2;
+    }
+    return 0;
+}
+
+/* Copy up to `max` payload bytes of the NAL unit starting at src, without
+ * emulation prevention bytes (00 00 03) and stopping at the next start code. */
+static int mf_nal_payload(const uint8_t *src, const uint8_t *end, uint8_t *dst, int max)
+{
+    int n = 0, zeros = 0;
+    for (; src < end && n < max; src++) {
+        if (zeros >= 2 && *src == 1) break;
+        if (zeros >= 2 && *src == 3) { zeros = 0; continue; }
+        zeros = *src ? 0 : zeros + 1;
+        dst[n++] = *src;
+    }
+    return n;
+}
+
+/* Can decoding start with this packet? Yes for a demuxer keyframe, a packet
+ * that carries its own parameter sets (an encoder resync point), an H.264 IDR
+ * or I/SI slice (an unmarked random access point) and an HEVC IRAP or I
+ * picture. A P/B picture cannot be decoded without its references. H.264 needs
+ * only the first two slice-header fields; HEVC's slice type depends on the PPS,
+ * so the header parser's reading is used once parameter sets were seen (both
+ * parsers report I by default). A packet without a picture is never held back. */
+static int mf_can_start_decoding(AVCodecContext *avctx, const AVPacket *packet, int own_parameter_sets)
+{
+    MFDecodeContext *c = avctx->priv_data;
+    const uint8_t *end = packet->data + packet->size;
+    if ((packet->flags & AV_PKT_FLAG_KEY) || own_parameter_sets) return 1;
+    for (const uint8_t *p = packet->data; p + 3 < end; p++) {
+        int type;
+        if (p[0] || p[1] || p[2] != 1) continue;
+        if (avctx->codec_id == AV_CODEC_ID_HEVC) {
+            type = (p[3] >> 1) & 0x3f;
+            if (type < 32) /* first picture NAL */
+                return (type >= 16 && type <= 23) ||
+                       (c->parameter_sets_seen && c->parser->pict_type == AV_PICTURE_TYPE_I);
+        } else {
+            type = p[3] & 0x1f;
+            if (type == 5) return 1;
+            if (type == 1 || type == 2) {
+                uint8_t header[16 + AV_INPUT_BUFFER_PADDING_SIZE] = { 0 };
+                const int n = mf_nal_payload(p + 4, end, header, 16);
+                GetBitContext gb;
+                unsigned slice_type;
+                if (!n || init_get_bits8(&gb, header, n) < 0) return 1;
+                get_ue_golomb_long(&gb); /* first_mb_in_slice */
+                slice_type = get_ue_golomb_long(&gb) % 5;
+                return slice_type == 2 || slice_type == 4; /* I or SI */
+            }
+        }
+        p += 2;
+    }
+    return 1;
+}
+
+/* recovery_frame_cnt of a recovery point SEI in this H.264 access unit, or -1.
+ * Greater than 0 marks gradual decoding refresh: the pictures up to that count
+ * are still incomplete. */
+static int mf_recovery_frame_cnt(const AVPacket *packet)
+{
+    const uint8_t *end = packet->data + packet->size;
+    for (const uint8_t *p = packet->data; p + 3 < end; p++) {
+        int type;
+        if (p[0] || p[1] || p[2] != 1) continue;
+        type = p[3] & 0x1f;
+        if (type == 1 || type == 2 || type == 5) return -1; /* SEI precedes the picture */
+        if (type == 6) {
+            uint8_t sei[256 + AV_INPUT_BUFFER_PADDING_SIZE] = { 0 };
+            const int n = mf_nal_payload(p + 4, end, sei, 256);
+            int at = 0;
+            while (at < n && sei[at] != 0x80) { /* 0x80: rbsp trailing bits */
+                int payload_type = 0, payload_size = 0;
+                while (at < n && sei[at] == 0xff) payload_type += sei[at++];
+                if (at >= n) break;
+                payload_type += sei[at++];
+                while (at < n && sei[at] == 0xff) payload_size += sei[at++];
+                if (at >= n) break;
+                payload_size += sei[at++];
+                if (payload_type == 6) {
+                    GetBitContext gb;
+                    if (init_get_bits8(&gb, sei + at, FFMIN(payload_size, n - at)) < 0) return -1;
+                    return get_ue_golomb_long(&gb);
+                }
+                at += payload_size;
+            }
+        }
+        p += 2;
+    }
+    return -1;
+}
+
+/* Length of a leading access unit delimiter NAL (start code included), or 0.
+ * An AUD must stay the first NAL of its access unit. */
+static int mf_leading_aud_size(enum AVCodecID id, const uint8_t *data, int size)
+{
+    int i = 0, header;
+    while (i < size && !data[i]) i++;
+    if (i < 2 || i + 1 >= size || data[i] != 1) return 0;
+    header = i + 1;
+    if (id == AV_CODEC_ID_H264 ? (data[header] & 0x1f) != 9 : ((data[header] >> 1) & 0x3f) != 35)
+        return 0;
+    for (i = header + 1; i + 2 < size; i++)
+        if (!data[i] && !data[i + 1] && data[i + 2] == 1)
+            return i > header + 1 && !data[i - 1] ? i - 1 : i;
+    return 0;
+}
+
+/* Feed an Annex B source's parameter sets with the first access unit after
+ * open/flush when that unit has none of its own. Without them Windows discards
+ * every picture until the next IDR (a seek landing on an H.264 recovery point
+ * lost up to a GOP), and the header parser had no real format to compare with.
+ * Repeating identical parameter sets is valid H.264/HEVC; they go after a
+ * leading AUD, the order FFmpeg's own MPEG-TS muxer writes. Known limit: a
+ * transport stream whose parameter sets change mid-stream WITHOUT repeating
+ * them in-band gets the first ones here, and a seek into the later part then
+ * decodes wrong pictures (FFmpeg's own decoder fails there as well). MP4-family
+ * sources never take this path. */
+static int mf_prefix_parameter_sets(AVCodecContext *avctx, AVPacket *packet)
+{
+    MFDecodeContext *c = avctx->priv_data;
+    AVPacket *prefixed;
+    int ret, aud;
+    if (!c->parameter_sets || !packet->size ||
+        mf_has_sequence_header(avctx->codec_id, packet->data, packet->size))
+        return 0;
+    /* The container switched to other parameter sets (an MP4 with several
+     * sample descriptions): the ones read at open would describe the wrong
+     * stream. Keep the previous behaviour, decoding from the next IDR. */
+    if (av_packet_get_side_data(packet, AV_PKT_DATA_NEW_EXTRADATA, NULL))
+        return 0;
+    if (packet->size > INT_MAX - AV_INPUT_BUFFER_PADDING_SIZE - c->parameter_sets_size)
+        return AVERROR_INVALIDDATA;
+    aud = mf_leading_aud_size(avctx->codec_id, packet->data, packet->size);
+    prefixed = av_packet_alloc();
+    if (!prefixed) return AVERROR(ENOMEM);
+    ret = av_new_packet(prefixed, c->parameter_sets_size + packet->size);
+    if (ret >= 0) ret = av_packet_copy_props(prefixed, packet);
+    if (ret < 0) { av_packet_free(&prefixed); return ret; }
+    memcpy(prefixed->data, packet->data, aud);
+    memcpy(prefixed->data + aud, c->parameter_sets, c->parameter_sets_size);
+    memcpy(prefixed->data + aud + c->parameter_sets_size, packet->data + aud, packet->size - aud);
+    av_packet_unref(packet);
+    av_packet_move_ref(packet, prefixed);
+    av_packet_free(&prefixed);
+    return 0;
+}
+
 static int mf_parse_video_header(AVCodecContext *avctx, const AVPacket *packet)
 {
     MFDecodeContext *c = avctx->priv_data;
@@ -427,7 +607,8 @@ static int mf_parse_video_header(AVCodecContext *avctx, const AVPacket *packet)
         uint8_t *parsed;
         int parsed_size, ret;
         const AVPixFmtDescriptor *desc;
-        const enum AVPixelFormat prior_format = c->source_format;
+        /* Compare only with a format a header actually declared (see header_format_known). */
+        const enum AVPixelFormat prior_format = c->header_format_known ? c->source_format : AV_PIX_FMT_NONE;
         const int prior_profile = c->parser_context->profile;
         const enum AVColorPrimaries prior_primaries = c->parser_context->color_primaries;
         const enum AVColorTransferCharacteristic prior_transfer = c->parser_context->color_trc;
@@ -461,7 +642,21 @@ static int mf_parse_video_header(AVCodecContext *avctx, const AVPacket *packet)
             c->failed = 1;
             return AVERROR(ENOSYS);
         }
-        if (c->parser->format >= 0) c->source_format = c->parser->format;
+        if (c->parser->format >= 0) {
+            /* The output was negotiated before any header declared the format
+             * (from the probe's guess). A first header that needs the other
+             * output depth must fail like a format change, not be truncated
+             * from 10 to 8 bit by the NV12 output that is still in place. */
+            desc = av_pix_fmt_desc_get(c->parser->format);
+            if (c->configured && !c->header_format_known && desc &&
+                (desc->comp[0].depth > 8) != (c->pixel_format == AV_PIX_FMT_P010LE)) {
+                av_log(avctx, AV_LOG_ERROR, "DUSKCUT_MF_DYNAMIC_FORMAT_UNSUPPORTED: This video changes bit depth, chroma, profile, colour or pixel aspect ratio within one stream. Split it into fixed-format clips before importing.\n");
+                c->failed = 1;
+                return AVERROR(ENOSYS);
+            }
+            c->source_format = c->parser->format;
+            c->header_format_known = 1;
+        }
         if (c->parser_context->profile >= 0) avctx->profile = c->parser_context->profile;
         if (c->parser_context->level >= 0) avctx->level = c->parser_context->level;
         mf_apply_header_metadata(avctx);
@@ -748,6 +943,14 @@ static int mf_receive_frame(AVCodecContext *avctx, AVFrame *frame)
                 if (++changes > 8) return AVERROR_INVALIDDATA;
                 continue;
             }
+            if (ret >= 0 && c->drop_outputs > 0) {
+                /* Started on a gradual decoding refresh point: these pictures
+                 * are still being refreshed (FFmpeg's own decoder withholds
+                 * them too; Windows would show them half grey). */
+                c->drop_outputs--;
+                av_frame_unref(frame);
+                continue;
+            }
             if (ret != AVERROR(EAGAIN)) return ret;
             if (c->draining) { c->eof = 1; return AVERROR_EOF; }
         }
@@ -763,11 +966,43 @@ static int mf_receive_frame(AVCodecContext *avctx, AVFrame *frame)
                 continue;
             }
             if (ret < 0) return ret;
-            /* Refresh VUI/profile for each new access unit. A later stream-change
-             * must choose P010 for new 10-bit content, never retain stale NV12.
-             * The retained packet is not parsed again after MFT backpressure. */
-            ret = mf_parse_video_header(avctx, c->packet);
-            if (ret < 0) return ret;
+            {
+                /* Judged on the packet as delivered, before any prefix below. */
+                const int own_parameter_sets = c->await_keyframe &&
+                    mf_has_sequence_header(avctx->codec_id, c->packet->data, c->packet->size);
+                if (c->need_parameter_sets) {
+                    ret = mf_prefix_parameter_sets(avctx, c->packet);
+                    if (ret < 0) { c->failed = 1; return ret; }
+                }
+                if (!c->audio && !c->parameter_sets_seen &&
+                    mf_has_sequence_header(avctx->codec_id, c->packet->data, c->packet->size))
+                    c->parameter_sets_seen = 1;
+                /* Refresh VUI/profile for each new access unit. A later stream-change
+                 * must choose P010 for new 10-bit content, never retain stale NV12.
+                 * The retained packet is not parsed again after MFT backpressure. */
+                ret = mf_parse_video_header(avctx, c->packet);
+                if (ret < 0) return ret;
+                if (c->await_keyframe) {
+                    /* After open or a seek, a transport stream first delivers the
+                     * tail of the previous GOP. Those pictures cannot be decoded
+                     * without their references; Windows discards them but keeps
+                     * their timestamps and gives one to the first real picture
+                     * (measured: the keyframe at 4.48 s came out as 4.44 s, and an
+                     * accurate seek then trimmed it). FFmpeg's own decoders output
+                     * nothing before a random access point either. The cap is a
+                     * last resort for a stream that never has one. */
+                    if (!mf_can_start_decoding(avctx, c->packet, own_parameter_sets) &&
+                        c->skipped_before_keyframe < MF_MAX_SKIP_BEFORE_KEYFRAME) {
+                        c->skipped_before_keyframe++;
+                        av_packet_unref(c->packet);
+                        continue;
+                    }
+                    c->await_keyframe = 0;
+                    if (avctx->codec_id == AV_CODEC_ID_H264)
+                        c->drop_outputs = FFMAX(0, mf_recovery_frame_cnt(c->packet));
+                }
+                c->need_parameter_sets = 0;
+            }
         }
         if (!c->configured) {
             ret = mf_set_input(avctx, c->packet);
@@ -807,6 +1042,10 @@ static void mf_flush(AVCodecContext *avctx)
     mf_clear_properties(c);
     c->draining = c->eof = c->failed = 0;
     c->discontinuity = 1;
+    /* A seek may resume mid-GOP, or at a recovery point without in-band
+     * parameter sets. */
+    c->need_parameter_sets = c->await_keyframe = !c->audio;
+    c->skipped_before_keyframe = c->drop_outputs = 0;
     if (c->mft && c->configured) {
         IMFTransform_ProcessMessage(c->mft, MFT_MESSAGE_COMMAND_FLUSH, 0);
         IMFTransform_ProcessMessage(c->mft, MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
@@ -823,6 +1062,7 @@ static av_cold int mf_close_decoder(AVCodecContext *avctx)
     av_packet_free(&c->packet);
     av_parser_close(c->parser);
     avcodec_free_context(&c->parser_context);
+    av_freep(&c->parameter_sets);
     mf_clear_properties(c);
 #if !HAVE_UWP
     if (c->library) dlclose(c->library);
@@ -849,6 +1089,21 @@ static av_cold int mf_init_decoder(AVCodecContext *avctx)
         c->parser_context->codec_id = avctx->codec_id;
         c->parser_context->codec_type = AVMEDIA_TYPE_VIDEO;
         c->parser->flags |= PARSER_FLAG_COMPLETE_FRAMES;
+        /* Only an Annex B source (transport stream, raw stream) needs the
+         * container copy: its extradata holds the in-band headers found while
+         * probing. MP4/MOV/MKV (avcC/hvcC) sources get the current parameter
+         * sets from the decoder's own filter, which alone follows a switch to
+         * another sample description: H.264 once before the first picture
+         * after open, flush or a change (h264_mp4toannexb resume_ps), HEVC at
+         * every IRAP picture. */
+        if (avctx->extradata_size >= 4 && avctx->extradata_size <= 1 << 20 &&
+            (AV_RB24(avctx->extradata) == 1 || AV_RB32(avctx->extradata) == 1) &&
+            mf_has_sequence_header(avctx->codec_id, avctx->extradata, avctx->extradata_size)) {
+            c->parameter_sets = av_memdup(avctx->extradata, avctx->extradata_size);
+            if (!c->parameter_sets) return AVERROR(ENOMEM);
+            c->parameter_sets_size = avctx->extradata_size;
+        }
+        c->need_parameter_sets = c->await_keyframe = 1;
     }
     c->discontinuity = 1;
     c->packet = av_packet_alloc();
@@ -907,5 +1162,5 @@ const FFCodec ff_ ## NAME ## _mf_decoder = { \
 
 MF_DECODER(aac, AAC, AUDIO, "aac_adtstoasc")
 MF_DECODER(aac_latm, AAC_LATM, AUDIO, NULL)
-MF_DECODER(h264, H264, VIDEO, "h264_mp4toannexb")
+MF_DECODER(h264, H264, VIDEO, "h264_mp4toannexb=resume_ps=1")
 MF_DECODER(hevc, HEVC, VIDEO, "hevc_mp4toannexb")
